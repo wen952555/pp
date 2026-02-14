@@ -55,17 +55,21 @@ fi
 
 # 4. Install Python Dependencies
 echo -e "\n${CYAN}[4/6] 安装 Python 依赖...${NC}"
-echo -e "${YELLOW}正在清理缓存并安装依赖，请耐心等待...${NC}"
-# Note: Use --no-cache-dir to avoid using cached git refs from failed attempts
-pip install --no-cache-dir -r requirements.txt
+echo -e "${YELLOW}正在安装依赖 (使用 PyPI 源)...${NC}"
+
+# Upgrade pip first to avoid compatibility issues
+pip install --upgrade pip
+
+# Install requirements
+pip install -r requirements.txt
 
 if [ $? -ne 0 ]; then
     echo -e "\n${RED}❌ 依赖安装失败！${NC}"
     echo -e "${YELLOW}可能原因：${NC}"
-    echo -e "1. GitHub 仓库连接失败 (网络问题或仓库不存在)"
-    echo -e "2. Python 环境问题"
-    echo -e "\n${CYAN}尝试解决方案：${NC}"
-    echo -e "• 编辑 requirements.txt 更换 git 仓库地址"
+    echo -e "1. 网络连接不稳定"
+    echo -e "2. Termux 源配置问题"
+    echo -e "\n${CYAN}建议尝试：${NC}"
+    echo -e "• 切换网络 (WiFi/流量)"
     echo -e "• 手动运行: pip install -r requirements.txt"
     exit 1
 fi
