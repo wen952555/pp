@@ -138,10 +138,68 @@ async def show_file_options(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             [InlineKeyboardButton("⬇️ 发送TG", callback_data=f"act_tg:{file_id}"), InlineKeyboardButton("✂️ 剪切", callback_data=f"act_cut:{file_id}")],
             [InlineKeyboardButton("🗑 删除", callback_data=f"act_del:{file_id}"), InlineKeyboardButton("🔙 返回", callback_data="ls:")]
         ]
+
+        # Add Cross-Account Copy if multiple accounts exist
+        if len(account_mgr.get_accounts_list()) > 1:
+            keyboard.insert(2, [InlineKeyboardButton("🚀 秒传到其他账号", callback_data=f"x_copy_menu:{file_id}")])
         
         await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     except Exception as e:
         await update.callback_query.answer(f"Error: {e}", show_alert=True)
+
+async def show_cross_copy_menu(update, context, file_id):
+    """Show list of accounts to copy file to"""
+    user_id = update.effective_user.id
+    current_user = account_mgr.active_user_map.get(str(user_id))
+    all_users = account_mgr.get_accounts_list()
+    
+    keyboard = []
+    for u in all_users:
+        if u == current_user: continue
+        # Pass file_id and target_username
+        keyboard.append([InlineKeyboardButton(f"📥 转存到: {u}", callback_data=f"x_copy_do:{file_id}:{u}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 返回", callback_data=f"file:{file_id}")])
+    
+    await update.callback_query.edit_message_text(
+        "🚀 **跨账号秒传**\n请选择目标账号:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def execute_cross_copy(update, context, file_id, target_user):
+    """Actually perform the copy via offline_download"""
+    user_id = update.effective_user.id
+    source_client = await account_mgr.get_client(user_id) # Active client
+    target_client = await account_mgr.get_client(user_id, specific_username=target_user) # Target client
+    
+    if not source_client or not target_client:
+        await update.callback_query.answer("账号认证失败", show_alert=True)
+        return
+
+    await update.callback_query.answer("⏳ 正在请求秒传...", show_alert=False)
+    
+    try:
+        # 1. Get source link
+        data = await source_client.get_download_url(file_id)
+        url = data.get('url')
+        name = data.get('name')
+        
+        if not url:
+            await update.callback_query.edit_message_text(f"❌ 无法获取源文件链接: {name}")
+            return
+            
+        # 2. Add task to target
+        await target_client.offline_download(url)
+        
+        await update.callback_query.edit_message_text(
+            f"✅ **秒传成功**\n\n文件: `{name}`\n已添加到账号: `{target_user}`\n(请在离线任务中确认)",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回文件", callback_data=f"file:{file_id}")]])
+        )
+    except Exception as e:
+        await update.callback_query.edit_message_text(f"❌ 秒传失败: {e}")
+
 
 # --- ADVANCED TOOLS ---
 
@@ -153,13 +211,6 @@ async def calculate_folder_size(update, context, folder_id):
     msg = await context.bot.send_message(update.effective_chat.id, "⏳ 正在递归计算文件夹体积 (这可能需要一点时间)...")
     
     try:
-        # NOTE: This effectively does a shallow list in current implementation logic 
-        # because recursive=True isn't standard in PikPak API list wrappers usually.
-        # We will iterate current folder. True recursion requires walking the tree.
-        # For safety/speed, we only sum the immediate children in this version 
-        # unless we implement a full walker. Let's do a simple walker for depth=1 or 2?
-        # Let's just do current folder flat sum for now to avoid timeout.
-        
         resp = await client.file_list(parent_id=folder_id)
         files = resp.get('files', []) if isinstance(resp, dict) else resp
         
@@ -198,13 +249,9 @@ async def process_regex_rename(update, context, pattern_str):
     del context.user_data['regex_context'] # Clear state
     
     try:
-        # Simple split by space, but handle quotes? keep it simple first.
-        # Support "Pattern" "Replacement" or Pattern Replacement
         import shlex
-        try:
-            parts = shlex.split(pattern_str)
-        except:
-            parts = pattern_str.split()
+        try: parts = shlex.split(pattern_str)
+        except: parts = pattern_str.split()
             
         if len(parts) < 1: 
             await context.bot.send_message(update.effective_chat.id, "❌ 格式错误")
@@ -216,7 +263,6 @@ async def process_regex_rename(update, context, pattern_str):
         user_id = update.effective_user.id
         client = await account_mgr.get_client(user_id)
         
-        # Get files
         resp = await client.file_list(parent_id=folder_id)
         files = resp.get('files', []) if isinstance(resp, dict) else resp
         

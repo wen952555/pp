@@ -6,7 +6,8 @@ from .accounts import account_mgr
 from .utils import get_local_ip
 from .handlers_file import (
     show_file_list, show_file_options, generate_playlist, 
-    deduplicate_folder, initiate_regex_rename, process_regex_rename, calculate_folder_size
+    deduplicate_folder, initiate_regex_rename, process_regex_rename, calculate_folder_size,
+    show_cross_copy_menu, execute_cross_copy
 )
 from .handlers_task import show_offline_tasks, handle_task_action, add_download_task
 
@@ -38,6 +39,10 @@ async def login_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     account_mgr.add_account_credentials(args[0], args[1])
+    # Delete command message for privacy
+    try: await update.message.delete()
+    except: pass
+    
     if await account_mgr.switch_account(update.effective_user.id, args[0]):
         await context.bot.send_message(update.effective_chat.id, f"✅ 登录成功: {args[0]}")
     else:
@@ -51,16 +56,45 @@ async def show_accounts_menu(update, context):
     kb = []
     for u in accounts:
         status = "✅" if u == active else ""
-        kb.append([InlineKeyboardButton(f"{status} {u}", callback_data=f"acc_switch:{u}")])
+        # Row: Switch | Delete
+        kb.append([
+            InlineKeyboardButton(f"{status} {u}", callback_data=f"acc_switch:{u}"),
+            InlineKeyboardButton("🗑", callback_data=f"acc_del:{u}")
+        ])
     
-    kb.append([InlineKeyboardButton("➕ 添加账号", callback_data="acc_add")])
+    kb.append([InlineKeyboardButton("➕ 添加新账号 (交互式)", callback_data="acc_add")])
     kb.append([InlineKeyboardButton("🔙 关闭", callback_data="close_menu")])
     
-    msg = f"👥 **多账号管理**\n当前激活: `{active}`"
+    msg = f"👥 **多账号管理**\n当前激活: `{active}`\n共 {len(accounts)} 个账号"
     if update.callback_query:
         await update.callback_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     else:
         await context.bot.send_message(update.effective_chat.id, msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+async def initiate_add_account(update, context):
+    context.user_data['adding_account'] = True
+    text = "👤 **添加新账号**\n\n请回复: `邮箱 密码`\n(例如: `test@gmail.com 123456`)\n\n⚠️ 为了安全，Bot 会尝试在处理后删除您的回复。"
+    await update.callback_query.edit_message_text(text, reply_markup=ForceReply(selective=True), parse_mode='Markdown')
+
+async def process_add_account(update, context, text):
+    del context.user_data['adding_account']
+    try:
+        parts = text.split()
+        if len(parts) < 2:
+            await context.bot.send_message(update.effective_chat.id, "❌ 格式错误，请重新添加")
+            return
+        
+        email = parts[0]
+        password = parts[1]
+        
+        # Privacy delete
+        try: await update.message.delete()
+        except: pass
+        
+        account_mgr.add_account_credentials(email, password)
+        await context.bot.send_message(update.effective_chat.id, f"✅ 已添加账号: `{email}`\n可在 [👥 账号管理] 中切换。", parse_mode='Markdown')
+    except Exception as e:
+        await context.bot.send_message(update.effective_chat.id, f"❌ 错误: {e}")
 
 async def show_alist_info(update, context):
     ip = get_local_ip()
@@ -108,6 +142,14 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd == "tool_size": await calculate_folder_size(update, context, arg)
     elif cmd == "tool_regex": await initiate_regex_rename(update, context, arg)
     elif cmd == "tool_alist": await show_alist_info(update, context)
+
+    # Cross Account Copy
+    elif cmd == "x_copy_menu": await show_cross_copy_menu(update, context, arg)
+    elif cmd == "x_copy_do":
+        # arg format: file_id:target_user
+        sub_parts = arg.split(':', 1)
+        if len(sub_parts) == 2:
+            await execute_cross_copy(update, context, sub_parts[0], sub_parts[1])
 
     elif cmd == "confirm_dedupe":
         ids = context.user_data.get('dedupe_ids')
@@ -164,7 +206,14 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await account_mgr.switch_account(user_id, arg):
             await query.answer(f"✅ 已切换: {arg}")
             await show_accounts_menu(update, context)
-    elif cmd == "acc_add": await context.bot.send_message(update.effective_chat.id, "➕ 使用 `/login 邮箱 密码` 添加", parse_mode='Markdown')
+    elif cmd == "acc_add": await initiate_add_account(update, context)
+    elif cmd == "acc_del":
+        if account_mgr.remove_account(arg):
+            await query.answer(f"🗑 已删除账号: {arg}")
+            await show_accounts_menu(update, context)
+        else:
+            await query.answer("❌ 删除失败")
+
     elif cmd == "close_menu": await query.delete_message()
     
     # Cleanup Commands
@@ -181,7 +230,12 @@ async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text.strip()
     user_id = update.effective_user.id
     
-    # 1. State Handling (Rename)
+    # 1. Add Account Flow
+    if 'adding_account' in context.user_data:
+        await process_add_account(update, context, msg)
+        return
+
+    # 2. Rename Flow
     if 'renaming_id' in context.user_data:
         client = await account_mgr.get_client(user_id)
         try:
@@ -191,12 +245,12 @@ async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del context.user_data['renaming_id']
         return
 
-    # 2. State Handling (Regex Rename)
+    # 3. Regex Rename Flow
     if 'regex_context' in context.user_data:
         await process_regex_rename(update, context, msg)
         return
 
-    # 3. Main Menu
+    # 4. Main Menus
     if msg == "📂 文件管理": await show_file_list(update, context)
     elif msg == "👥 账号管理": await show_accounts_menu(update, context)
     elif msg == "📉 离线任务": await show_offline_tasks(update, context)
@@ -230,6 +284,6 @@ async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif msg == "➕ 添加任务":
         await context.bot.send_message(update.effective_chat.id, "📥 请直接发送链接 (Magnet/HTTP) 或 .txt 文件")
 
-    # 4. Link Handling (Add Task)
+    # 5. Link Handling (Add Task)
     elif "http" in msg or "magnet:" in msg:
         await add_download_task(update, context, msg)

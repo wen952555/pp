@@ -43,21 +43,39 @@ class AccountManager:
         self.accounts[u] = p
         self.save_accounts()
 
+    def remove_account(self, u):
+        if u in self.accounts:
+            del self.accounts[u]
+            if u in self.clients:
+                del self.clients[u]
+            # Reset active user map for users using this account
+            for uid, user in list(self.active_user_map.items()):
+                if user == u:
+                    del self.active_user_map[uid]
+            self.save_accounts()
+            return True
+        return False
+
     def get_accounts_list(self):
         return list(self.accounts.keys())
 
-    async def get_client(self, tg_user_id):
-        """Get or create authenticated client for the user"""
+    async def get_client(self, tg_user_id, specific_username=None):
+        """
+        Get or create authenticated client.
+        If specific_username is provided, gets client for that user (ignoring active map).
+        """
         if not PIKPAK_AVAILABLE: return None
         
-        # Determine username
-        username = self.active_user_map.get(str(tg_user_id))
+        username = specific_username
         if not username:
-            if self.accounts:
-                username = list(self.accounts.keys())[0]
-                self.active_user_map[str(tg_user_id)] = username
-            else:
-                return None
+            # Determine active username
+            username = self.active_user_map.get(str(tg_user_id))
+            if not username:
+                if self.accounts:
+                    username = list(self.accounts.keys())[0]
+                    self.active_user_map[str(tg_user_id)] = username
+                else:
+                    return None
 
         # Return existing session
         if username in self.clients:
