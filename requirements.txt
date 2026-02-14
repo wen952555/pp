@@ -3,3 +3,5 @@ pikpakapi>=0.0.1
 python-dotenv
 yt-dlp
 requests
+aiohttp
+netifaces
