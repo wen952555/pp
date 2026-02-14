@@ -57,6 +57,14 @@ echo -e "\n${CYAN}[4/6] 安装 Python 依赖...${NC}"
 # Note: In Termux, do not upgrade pip via pip itself.
 pip install -r requirements.txt
 
+if [ $? -ne 0 ]; then
+    echo -e "${YELLOW}❌ 依赖安装失败！可能原因：${NC}"
+    echo -e "1. 网络问题 (Git clone 失败)"
+    echo -e "2. Termux 源问题"
+    echo -e "请尝试切换网络或手动运行 pip install -r requirements.txt 查看详细错误。"
+    exit 1
+fi
+
 # 5. Interactive Configuration
 echo -e "\n${CYAN}[5/6] 配置 Bot 信息${NC}"
 echo -e "配置文件路径: ${YELLOW}$ENV_FILE${NC}"
