@@ -7,7 +7,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}=========================================${NC}"
-echo -e "${GREEN}    PikPak Termux Bot - 一键部署脚本    ${NC}"
+echo -e "${GREEN}    PikPak Termux Bot - 旗舰版部署      ${NC}"
 echo -e "${GREEN}=========================================${NC}"
 
 # 1. Update packages
@@ -22,21 +22,32 @@ else
     echo -e "${GREEN}[-] Python 已安装${NC}"
 fi
 
-# 3. Install Git
+# 3. Install System Tools (Git, FFmpeg, Aria2)
+echo -e "\n${CYAN}[2/5] 安装系统工具...${NC}"
+
 if ! command -v git >/dev/null 2>&1; then
-    echo -e "${GREEN}[+] 安装 Git...${NC}"
     pkg install git -y
+fi
+
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    echo -e "${GREEN}[+] 安装 FFmpeg (媒体解析)...${NC}"
+    pkg install ffmpeg -y
+fi
+
+if ! command -v aria2c >/dev/null 2>&1; then
+    echo -e "${GREEN}[+] 安装 Aria2 (本地高速下载)...${NC}"
+    pkg install aria2 -y
 else
-    echo -e "${GREEN}[-] Git 已安装${NC}"
+    echo -e "${GREEN}[-] Aria2 已安装${NC}"
 fi
 
 # 4. Install Dependencies
-echo -e "\n${CYAN}[2/5] 安装/更新 Python 依赖...${NC}"
+echo -e "\n${CYAN}[3/5] 安装 Python 依赖...${NC}"
 pip install --upgrade pip
 pip install -r requirements.txt
 
 # 5. Interactive Configuration
-echo -e "\n${CYAN}[3/5] 配置 Bot 信息${NC}"
+echo -e "\n${CYAN}[4/5] 配置 Bot 信息${NC}"
 if [ -f ".env" ]; then
     echo -e "${YELLOW}检测到已存在配置文件 .env${NC}"
     read -p "是否重新配置? (y/n): " reconfig
@@ -64,11 +75,14 @@ if [ ! -f ".env" ]; then
 fi
 
 # 6. Set permissions
-echo -e "\n${CYAN}[4/5] 设置运行权限...${NC}"
+echo -e "\n${CYAN}[5/5] 设置运行权限...${NC}"
 chmod +x start.sh
+
+# Create download folder
+mkdir -p downloads
 
 echo -e "\n${GREEN}=========================================${NC}"
 echo -e "${GREEN}   ✅ 部署完成!   ${NC}"
 echo -e "${GREEN}=========================================${NC}"
 echo -e "输入 ${CYAN}./start.sh${NC} 即可启动机器人。"
-echo -e "如果要后台运行，建议安装 screen 或 tmux。"
+echo -e "功能: 批量离线、本地下载(Aria2)、文件管理(/ls, /rename)、直链提取。"

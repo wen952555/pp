@@ -1,3 +1,5 @@
 python-telegram-bot
 pikpak-api
 python-dotenv
+yt-dlp
+requests
