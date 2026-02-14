@@ -1,6 +1,6 @@
 import React from 'react';
 import { TerminalBlock } from './TerminalBlock';
-import { Terminal, Shield, Play } from 'lucide-react';
+import { Terminal, Shield, Play, FolderPlus } from 'lucide-react';
 
 export const TermuxGuide: React.FC = () => {
   return (
@@ -10,45 +10,55 @@ export const TermuxGuide: React.FC = () => {
           <Terminal className="text-green-500" />
           Termux Deployment
         </h2>
-        <p className="text-gray-400 mt-2">Run these commands in your Termux app on Android.</p>
+        <p className="text-gray-400 mt-2">Follow these simple steps to get your bot running.</p>
       </div>
 
       <div className="relative pl-8 border-l border-gray-700 space-y-12">
         {/* Step 1 */}
         <div className="relative">
           <div className="absolute -left-[41px] bg-gray-800 border border-gray-600 rounded-full w-8 h-8 flex items-center justify-center text-white font-bold">1</div>
-          <h3 className="text-xl font-semibold text-white mb-2">Update & Install Dependencies</h3>
-          <p className="text-gray-400 mb-4">First, ensure your package lists are up to date and install Python.</p>
+          <h3 className="text-xl font-semibold text-white mb-2">Create Project Folder</h3>
+          <p className="text-gray-400 mb-4">Open Termux and create a directory for your bot.</p>
           <TerminalBlock 
-            code={`pkg update && pkg upgrade -y
-pkg install python git -y
-pip install --upgrade pip`} 
+            code={`mkdir pikpak-bot
+cd pikpak-bot`} 
           />
         </div>
 
         {/* Step 2 */}
         <div className="relative">
           <div className="absolute -left-[41px] bg-gray-800 border border-gray-600 rounded-full w-8 h-8 flex items-center justify-center text-white font-bold">2</div>
-          <h3 className="text-xl font-semibold text-white mb-2">Install Python Libraries</h3>
-          <p className="text-gray-400 mb-4">Install the Telegram Bot library. You may also need to find a working PikPak wrapper from GitHub (e.g., via git clone) or PyPI.</p>
+          <h3 className="text-xl font-semibold text-white mb-2">Create Files</h3>
+          <p className="text-gray-400 mb-4">
+            Create the 4 files generated in the <strong>"Generate Script"</strong> tab (<code>setup.sh</code>, <code>requirements.txt</code>, <code>bot.py</code>, <code>start.sh</code>).
+            <br/>You can use <code>nano filename</code> to create/edit files.
+          </p>
           <TerminalBlock 
-            code={`pip install python-telegram-bot
-# Example for a pikpak wrapper (verify the package name first)
-pip install pikpak-api`} 
+            code={`# Example:
+nano setup.sh 
+# (Paste setup.sh content, Save with Ctrl+X -> Y -> Enter)
+
+nano requirements.txt
+# (Paste requirements.txt content...)
+
+nano bot.py
+# (Paste bot.py content...)
+
+nano start.sh
+# (Paste start.sh content...)`} 
           />
         </div>
 
         {/* Step 3 */}
         <div className="relative">
           <div className="absolute -left-[41px] bg-gray-800 border border-gray-600 rounded-full w-8 h-8 flex items-center justify-center text-white font-bold">3</div>
-          <h3 className="text-xl font-semibold text-white mb-2">Create the Bot File</h3>
+          <h3 className="text-xl font-semibold text-white mb-2">Run One-Click Setup</h3>
           <p className="text-gray-400 mb-4">
-            You can use `nano` to paste the code you generated in the previous step.
+            Give execution permissions and run the setup script. This will automatically install Python, pip, and all required libraries.
           </p>
           <TerminalBlock 
-            code={`pkg install nano
-nano bot.py
-# (Paste the code from the generator, then Press Ctrl+X, Y, Enter)`} 
+            code={`chmod +x setup.sh start.sh
+./setup.sh`} 
           />
         </div>
 
@@ -57,15 +67,15 @@ nano bot.py
           <div className="absolute -left-[41px] bg-brand-pikpak border border-yellow-600 rounded-full w-8 h-8 flex items-center justify-center text-black font-bold shadow-lg shadow-yellow-500/50">
             <Play size={14} fill="currentColor" />
           </div>
-          <h3 className="text-xl font-semibold text-white mb-2">Run the Bot</h3>
-          <p className="text-gray-400 mb-4">Start your bot. It should print "Bot is polling...".</p>
+          <h3 className="text-xl font-semibold text-white mb-2">Start the Bot</h3>
+          <p className="text-gray-400 mb-4">Run the start script. It includes a restart loop to keep your bot alive if it crashes.</p>
           <TerminalBlock 
-            code={`python bot.py`} 
+            code={`./start.sh`} 
           />
           <div className="bg-gray-800 p-4 rounded-lg border border-gray-700 mt-4 flex gap-3">
              <Shield className="text-green-400 shrink-0" />
              <p className="text-sm text-gray-300">
-                <strong>Tip:</strong> To keep the bot running in the background even when you close Termux, consider using <code>nohup python bot.py &</code> or installing a process manager like <code>pm2</code> (requires nodejs).
+                <strong>Tip:</strong> The <code>start.sh</code> script keeps the bot running in the foreground. To run it in the background, you can use a session manager like <code>tmux</code> (run <code>pkg install tmux</code>).
              </p>
           </div>
         </div>
