@@ -4,6 +4,7 @@
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
+RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}=========================================${NC}"
@@ -59,10 +60,13 @@ echo -e "${YELLOW}正在清理缓存并安装依赖，请耐心等待...${NC}"
 pip install --no-cache-dir -r requirements.txt
 
 if [ $? -ne 0 ]; then
-    echo -e "${YELLOW}❌ 依赖安装失败！可能原因：${NC}"
-    echo -e "1. 网络问题 (Git clone 失败)"
-    echo -e "2. Github 连接不稳定 (请尝试开启/关闭 VPN)"
-    echo -e "请手动运行: pip install -r requirements.txt"
+    echo -e "\n${RED}❌ 依赖安装失败！${NC}"
+    echo -e "${YELLOW}可能原因：${NC}"
+    echo -e "1. GitHub 仓库连接失败 (网络问题或仓库不存在)"
+    echo -e "2. Python 环境问题"
+    echo -e "\n${CYAN}尝试解决方案：${NC}"
+    echo -e "• 编辑 requirements.txt 更换 git 仓库地址"
+    echo -e "• 手动运行: pip install -r requirements.txt"
     exit 1
 fi
 
