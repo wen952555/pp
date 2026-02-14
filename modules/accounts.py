@@ -47,7 +47,7 @@ class AccountManager:
             del self.accounts[u]
             if u in self.clients:
                 del self.clients[u]
-            # Reset active user map for users using this account
+            # Reset active user map
             for uid, user in list(self.active_user_map.items()):
                 if user == u:
                     del self.active_user_map[uid]
@@ -58,10 +58,10 @@ class AccountManager:
     def get_accounts_list(self):
         return list(self.accounts.keys())
 
-    async def get_client(self, tg_user_id, specific_username=None):
+    async def get_client(self, tg_user_id, specific_username=None, force_refresh=False):
         """
         Get or create authenticated client.
-        If specific_username is provided, gets client for that user (ignoring active map).
+        :param force_refresh: If True, forces a re-login (useful for expired tokens)
         """
         if not PIKPAK_AVAILABLE: 
             logger.error("PikPak API library not installed.")
@@ -77,9 +77,9 @@ class AccountManager:
                     self.active_user_map[str(tg_user_id)] = username
                 else:
                     return None
-
-        # Return existing session
-        if username in self.clients:
+        
+        # Check cache unless forcing refresh
+        if not force_refresh and username in self.clients:
             return self.clients[username]
         
         # Login new session
@@ -87,7 +87,7 @@ class AccountManager:
         if not password: return None
 
         try:
-            logger.info(f"Logging in for {username}...")
+            logger.info(f"Logging in for {username} (Refresh: {force_refresh})...")
             client = PikPakApi(username=username, password=password)
             await client.login()
             self.clients[username] = client
@@ -99,8 +99,8 @@ class AccountManager:
     async def switch_account(self, tg_user_id, target_username):
         if target_username in self.accounts:
             self.active_user_map[str(tg_user_id)] = target_username
-            # Warm up connection
-            client = await self.get_client(tg_user_id)
+            # Warm up connection with force refresh to ensure it works
+            client = await self.get_client(tg_user_id, force_refresh=True)
             return client is not None
         return False
 
