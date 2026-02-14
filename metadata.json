@@ -1,0 +1,5 @@
+{
+  "name": "PikPak-Termux-Bot Generator",
+  "description": "A configuration wizard and script generator to deploy a Telegram Bot for managing PikPak on Termux/Android.",
+  "requestFramePermissions": []
+}
