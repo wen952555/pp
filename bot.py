@@ -1,3 +1,4 @@
+
 import logging
 import os
 import sys
@@ -62,7 +63,7 @@ try:
     from pikpakapi import PikPakApi
     PIKPAK_AVAILABLE = True
 except ImportError:
-    logger.warning("pikpak-api library not found. Running in SIMULATION mode.")
+    logger.warning("pikpakapi library not found. Please pip install pikpakapi")
 
 # Global Client Cache
 pikpak_client = None
@@ -72,8 +73,10 @@ async def get_client():
     if not PIKPAK_AVAILABLE: return None
     if pikpak_client is None:
         try:
+            logger.info(f"Logging in as {PIKPAK_USER}...")
             pikpak_client = PikPakApi(username=PIKPAK_USER, password=PIKPAK_PASS)
             await pikpak_client.login()
+            logger.info("PikPak Login Successful")
         except Exception as e:
             logger.error(f"Login failed: {e}")
             return None
@@ -103,7 +106,10 @@ async def check_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool
 
 def format_bytes(size):
     if not size: return "0 B"
-    size = int(size)
+    try:
+        size = int(size)
+    except:
+        return "Unknown"
     power = 2**10
     n = 0
     power_labels = {0 : '', 1: 'K', 2: 'M', 3: 'G', 4: 'T'}
@@ -121,6 +127,10 @@ def extract_direct_url_with_ytdlp(url):
             return info.get('url', None)
     except: return None
 
+def get_download_url_from_data(data):
+    """Safe extract download url from various API response formats"""
+    return data.get('web_content_link') or data.get('url') or data.get('download_url')
+
 # --- MENUS & KEYBOARDS ---
 
 def main_menu_keyboard():
@@ -134,25 +144,41 @@ def main_menu_keyboard():
 async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, parent_id=None, page=0, edit_msg=False, search_query=None):
     client = await get_client()
     if not client:
-        text = "⚠️ API 未连接 (模拟模式)"
+        text = "⚠️ API 连接失败，请检查账号密码或网络"
         if edit_msg: await update.callback_query.edit_message_text(text)
         else: await context.bot.send_message(update.effective_chat.id, text)
         return
 
     try:
-        if search_query:
-            # Search mode
-            # Note: pikpakapi file_list supports name arg for search
-            files = await client.file_list(parent_id=None, name=search_query)
-            title = f"🔍 **搜索结果**: `{search_query}`"
+        files = []
+        next_page_token = None
+        
+        # Determine parameters
+        kwargs = {'limit': 100} # Fetch more items to avoid empty pages
+        if parent_id: kwargs['parent_id'] = parent_id
+        if search_query: kwargs['name'] = search_query
+
+        # Call API
+        resp = await client.file_list(**kwargs)
+        
+        # Handle Response (Dict vs List)
+        if isinstance(resp, dict):
+            files = resp.get('files', [])
+            next_page_token = resp.get('next_page_token')
+        elif isinstance(resp, list):
+            files = resp
         else:
-            # Normal list
-            files = await client.file_list(parent_id=parent_id)
-            title = f"📂 **文件列表**\n目录ID: `{parent_id or 'ROOT'}`"
+            logger.error(f"Unknown API response type: {type(resp)}")
+
+        title = f"🔍 **搜索**: `{search_query}`" if search_query else f"📂 **目录**: `{parent_id or 'ROOT'}`"
 
         # Sort: Folders first
-        files.sort(key=lambda x: (x.get('kind') != 'drive#folder', x.get('name')))
-        
+        try:
+            files.sort(key=lambda x: (x.get('kind') != 'drive#folder', x.get('name')))
+        except Exception as e:
+            logger.error(f"Sort error: {e}")
+
+        # Client-side Pagination
         items_per_page = 10
         total_items = len(files)
         start_idx = page * items_per_page
@@ -166,7 +192,6 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         if parent_id or search_query:
             nav_top.append(InlineKeyboardButton("🏠 首页", callback_data="ls:"))
         if parent_id:
-             # PikPak API doesn't give easy parent ID, so we default to Root for "Back" to be safe
             nav_top.append(InlineKeyboardButton("🔙 返回根目录", callback_data="ls:"))
         if nav_top: keyboard.append(nav_top)
 
@@ -188,10 +213,8 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
             
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=cb_data)])
 
-        # Pagination
+        # Pagination Control
         nav_row = []
-        # Construct callback data properly for pagination
-        # Format: page:parent_id:page_num:search_query
         s_q_safe = search_query if search_query else ""
         p_id_safe = parent_id if parent_id else ""
         
@@ -199,23 +222,29 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
             nav_row.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"page:{p_id_safe}:{page-1}:{s_q_safe}"))
         if end_idx < total_items:
             nav_row.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"page:{p_id_safe}:{page+1}:{s_q_safe}"))
-        if nav_row:
-            keyboard.append(nav_row)
+        
+        if nav_row: keyboard.append(nav_row)
 
-        text = f"{title}\n共 {total_items} 个项目"
+        text = f"{title}\n共 {total_items} 个项目 (显示 {start_idx+1}-{min(end_idx, total_items)})"
         
         if not current_files and page == 0:
-            text += "\n(空文件夹或无结果)"
+            text += "\n\n(空文件夹或无结果)"
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         if edit_msg:
-            await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode='Markdown')
+            # Check if content actually changed to avoid API error
+            try:
+                await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode='Markdown')
+            except Exception as e:
+                # If message is not modified, ignore
+                if "Message is not modified" not in str(e):
+                    raise e
         else:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='Markdown')
 
     except Exception as e:
-        logger.error(e)
+        logger.error(f"File list error: {e}", exc_info=True)
         err_text = f"❌ 读取失败: {str(e)}"
         if edit_msg: await update.callback_query.edit_message_text(err_text)
         else: await context.bot.send_message(update.effective_chat.id, err_text)
@@ -223,11 +252,13 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
 async def show_file_options(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id):
     client = await get_client()
     try:
+        # Some API versions return file info directly via get_file or we use file_list with id
+        # But commonly get_download_url returns the file object with link
         data = await client.get_download_url(file_id)
+        
         name = data.get('name', 'Unknown')
         size = format_bytes(data.get('size', 0))
-        url = data.get('url') # Direct link
-        mime = data.get('mime_type', '')
+        mime = data.get('mime_type', 'unknown')
         
         text = (
             f"📄 **文件操作**\n"
@@ -257,15 +288,24 @@ async def show_file_options(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             parse_mode='Markdown'
         )
     except Exception as e:
-        await update.callback_query.answer(f"Error: {str(e)}", show_alert=True)
+        logger.error(f"File options error: {e}")
+        await update.callback_query.answer(f"获取信息失败: {str(e)}", show_alert=True)
 
 async def show_offline_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client = await get_client()
     if not client: return
     
     try:
-        # Fetch tasks (limit 20)
-        tasks = await client.offline_list(limit=20)
+        # Fetch tasks
+        resp = await client.offline_list(limit=20)
+        
+        # Handle dict response
+        if isinstance(resp, dict):
+            tasks = resp.get('tasks', [])
+        elif isinstance(resp, list):
+            tasks = resp
+        else:
+            tasks = []
         
         if not tasks:
             await context.bot.send_message(update.effective_chat.id, "📉 **当前没有离线任务**", parse_mode='Markdown')
@@ -274,20 +314,21 @@ async def show_offline_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE)
         text = "📉 **离线下载任务**\n\n"
         for task in tasks:
             name = task.get('name', 'Unknown')
-            # Phase: PHASE_TYPE_RUNNING, PHASE_TYPE_COMPLETE, PHASE_TYPE_ERROR
             phase = task.get('phase')
             progress = task.get('progress', 0)
-            status_icon = "⏳"
+            message = task.get('message', '')
             
+            status_icon = "⏳"
             if phase == 'PHASE_TYPE_COMPLETE': status_icon = "✅"
             elif phase == 'PHASE_TYPE_ERROR': status_icon = "❌"
             elif phase == 'PHASE_TYPE_RUNNING': status_icon = "🚀"
             
-            text += f"{status_icon} `{name[:25]}...`\n   └ 进度: {progress}%\n\n"
+            text += f"{status_icon} `{name[:25]}...`\n   └ 进度: {progress}% {message}\n\n"
             
         await context.bot.send_message(update.effective_chat.id, text, parse_mode='Markdown')
         
     except Exception as e:
+        logger.error(f"Offline tasks error: {e}")
         await context.bot.send_message(update.effective_chat.id, f"❌ 获取任务失败: {e}")
 
 # --- CALLBACK HANDLER ---
@@ -308,19 +349,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif cmd == "page":
         # Format: page:parent_id:page_num:search_query
-        # We need to split manually based on knowledge of structure
-        # arg string is: "parent_id:page_num:search_query"
-        # Since parent_id or search_query might be empty or None strings
-        p_args = arg.split(':')
-        # p_args[0] = parent_id
-        # p_args[1] = page_num
-        # p_args[2] = search_query (optional)
-        
-        pid = p_args[0] if p_args[0] else None
-        page = int(p_args[1])
-        sq = p_args[2] if len(p_args) > 2 and p_args[2] else None
-        
-        await show_file_list(update, context, parent_id=pid, page=page, edit_msg=True, search_query=sq)
+        try:
+            p_args = arg.split(':')
+            pid = p_args[0] if p_args[0] else None
+            page = int(p_args[1])
+            sq = p_args[2] if len(p_args) > 2 and p_args[2] else None
+            await show_file_list(update, context, parent_id=pid, page=page, edit_msg=True, search_query=sq)
+        except Exception as e:
+            logger.error(f"Pagination error: {e}")
 
     elif cmd == "file":
         await show_file_options(update, context, arg)
@@ -329,8 +365,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         client = await get_client()
         try:
             d = await client.get_download_url(arg)
-            url = d.get('url')
-            await context.bot.send_message(update.effective_chat.id, f"🔗 **直链 (有时效)**:\n\n`{url}`", parse_mode='Markdown')
+            url = get_download_url_from_data(d)
+            if url:
+                await context.bot.send_message(update.effective_chat.id, f"🔗 **直链 (有时效)**:\n\n`{url}`", parse_mode='Markdown')
+            else:
+                await context.bot.send_message(update.effective_chat.id, "❌ 未找到下载链接")
         except Exception as e:
             await context.bot.send_message(update.effective_chat.id, f"❌ 获取失败: {e}")
 
@@ -338,13 +377,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         client = await get_client()
         try:
             d = await client.get_download_url(arg)
-            url = d.get('url')
+            url = get_download_url_from_data(d)
             name = d.get('name', 'video')
-            # Create player links
-            # PotPlayer: potplayer://link
-            # VLC: vlc://link
-            # nPlayer: nplayer-http://link (iOS)
-            
+            if not url:
+                await context.bot.send_message(update.effective_chat.id, "❌ 无法获取播放链接")
+                return
+
             kb = [
                 [InlineKeyboardButton("VLC 播放", url=f"vlc://{url}")],
                 [InlineKeyboardButton("nPlayer 播放", url=f"nplayer-{url}")],
@@ -377,6 +415,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd == "act_del":
         client = await get_client()
         try:
+            # delete_file usually expects a list of IDs
             await client.delete_file([arg])
             # Go back to list
             await query.edit_message_text("✅ 文件已删除")
@@ -408,8 +447,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_file_list(update, context, parent_id=None)
     elif text == "☁️ 空间状态":
         await space_info(update, context)
-    elif text == "🗑 清空回收站":
-        await empty_trash(update, context)
     elif text == "📉 离线任务":
         await show_offline_tasks(update, context)
     elif text == "🔍 搜索文件":
@@ -427,7 +464,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "`/mkdir <名>` - 新建文件夹\n"
             "`/mv <文件ID> <目录ID>` - 移动\n"
             "`/rename <ID> <名>` - 重命名\n"
-            "`/invite <ID>` - 授权新用户"
+            "`/invite <ID>` - 授权新用户\n"
+            "`/trash` - 清空回收站"
         )
         await context.bot.send_message(update.effective_chat.id, help_txt, parse_mode='Markdown')
     else:
@@ -470,9 +508,11 @@ async def handle_download_links(update: Update, context: ContextTypes.DEFAULT_TY
             parsed = extract_direct_url_with_ytdlp(link)
             if parsed: final = parsed
         try:
+            # pikpakapi uses offline_download(url)
             await client.offline_download(final)
             success += 1
-        except: pass
+        except Exception as e:
+            logger.error(f"Download add failed: {e}")
     
     await context.bot.edit_message_text(
         chat_id=update.effective_chat.id, 
@@ -493,11 +533,15 @@ async def get_file_to_tg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         data = await client.get_download_url(file_id)
-        url = data.get('url')
+        url = get_download_url_from_data(data)
         name = data.get('name', 'downloaded_file')
         size = int(data.get('size', 0))
 
-        if size > 50 * 1024 * 1024:
+        if not url:
+             await context.bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text="❌ 无法获取下载链接")
+             return
+
+        if size > 49 * 1024 * 1024:
             await context.bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=f"⚠️ 文件 > 50MB ({format_bytes(size)})，无法通过 Bot 发送。\n请使用 [🔗 获取直链] 或 [🚀 Aria2]。")
             return
 
@@ -516,6 +560,7 @@ async def get_file_to_tg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
 
     except Exception as e:
+        logger.error(e)
         await context.bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=f"❌ 错误: {e}")
 
 async def download_local_aria2(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -528,17 +573,27 @@ async def download_local_aria2(update: Update, context: ContextTypes.DEFAULT_TYP
 
     try:
         data = await client.get_download_url(file_id)
-        url = data.get('url')
+        url = get_download_url_from_data(data)
         name = data.get('name', 'download')
         
+        if not url:
+             await context.bot.send_message(chat_id=chat_id, text="❌ 无法获取下载链接")
+             return
+
         if not os.path.exists(DOWNLOAD_PATH): os.makedirs(DOWNLOAD_PATH)
+        abs_path = os.path.abspath(DOWNLOAD_PATH)
         
-        cmd = ['aria2c', '-d', DOWNLOAD_PATH, '-o', name, url]
+        # Check if aria2c exists
+        if subprocess.call("command -v aria2c", shell=True) != 0:
+             await context.bot.send_message(chat_id=chat_id, text="❌ 未安装 Aria2 (运行 `pkg install aria2`)")
+             return
+
+        cmd = ['aria2c', '-d', abs_path, '-o', name, url]
         subprocess.Popen(cmd)
         
         await context.bot.send_message(
             chat_id=chat_id, 
-            text=f"🚀 **Aria2 已启动**\n文件: `{name}`\n位置: `{os.path.abspath(DOWNLOAD_PATH)}`",
+            text=f"🚀 **Aria2 已启动**\n文件: `{name}`\n位置: `{abs_path}`",
             parse_mode='Markdown'
         )
     except Exception as e:
@@ -561,7 +616,9 @@ async def rename_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def move_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update, context): return
-    if len(context.args) < 2: return
+    if len(context.args) < 2: 
+        await context.bot.send_message(update.effective_chat.id, "用法: `/mv <文件ID> <目标文件夹ID>`", parse_mode='Markdown')
+        return
     client = await get_client()
     try:
         await client.move_file(file_ids=[context.args[0]], parent_id=context.args[1])
@@ -574,11 +631,13 @@ async def space_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not client: return
     try:
         info = await client.get_quota_info()
+        # info is usually a dict
         limit = int(info.get('quota', 0))
         usage = int(info.get('usage', 0))
         text = f"☁️ **PikPak 空间**\n总计: `{format_bytes(limit)}`\n已用: `{format_bytes(usage)}`\n剩余: `{format_bytes(limit - usage)}`"
         await context.bot.send_message(update.effective_chat.id, text, parse_mode='Markdown')
-    except: pass
+    except Exception as e:
+        logger.error(f"Space info error: {e}")
 
 async def empty_trash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client = await get_client()
@@ -586,7 +645,8 @@ async def empty_trash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await client.trash_empty()
         await context.bot.send_message(update.effective_chat.id, "✅ 回收站已清空")
-    except: pass
+    except Exception as e:
+        await context.bot.send_message(update.effective_chat.id, f"❌ 失败: {e}")
 
 async def invite_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != str(ADMIN_ID): return
@@ -609,6 +669,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('rename', rename_file))
     application.add_handler(CommandHandler('mv', move_file))
     application.add_handler(CommandHandler('invite', invite_user))
+    application.add_handler(CommandHandler('trash', empty_trash))
     
     # Compatibility Commands
     application.add_handler(CommandHandler('ls', lambda u,c: show_file_list(u,c,None)))

@@ -60,8 +60,8 @@ echo -e "${YELLOW}正在安装依赖 (使用 PyPI 源)...${NC}"
 # Upgrade pip first to avoid compatibility issues
 pip install --upgrade pip
 
-# Install requirements
-pip install -r requirements.txt
+# Install requirements with --upgrade to ensure latest version
+pip install --upgrade -r requirements.txt
 
 if [ $? -ne 0 ]; then
     echo -e "\n${RED}❌ 依赖安装失败！${NC}"
