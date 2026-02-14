@@ -5,6 +5,7 @@ import asyncio
 import json
 import subprocess
 import requests
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 from telegram import (
@@ -12,7 +13,8 @@ from telegram import (
     InlineKeyboardButton, 
     InlineKeyboardMarkup, 
     ReplyKeyboardMarkup, 
-    ReplyKeyboardRemove
+    ReplyKeyboardRemove,
+    ForceReply
 )
 from telegram.ext import (
     ApplicationBuilder, 
@@ -62,7 +64,7 @@ try:
 except ImportError:
     logger.warning("pikpak-api library not found. Running in SIMULATION mode.")
 
-# Global Client Cache (Simple)
+# Global Client Cache
 pikpak_client = None
 
 async def get_client():
@@ -124,12 +126,12 @@ def extract_direct_url_with_ytdlp(url):
 def main_menu_keyboard():
     keyboard = [
         ["📂 文件管理", "☁️ 空间状态"],
-        ["➕ 添加任务", "🗑 清空回收站"],
-        ["⚙️ 帮助/设置"]
+        ["📉 离线任务", "🔍 搜索文件"],
+        ["➕ 添加任务", "⚙️ 帮助/设置"]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, parent_id=None, page=0, edit_msg=False):
+async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, parent_id=None, page=0, edit_msg=False, search_query=None):
     client = await get_client()
     if not client:
         text = "⚠️ API 未连接 (模拟模式)"
@@ -138,12 +140,19 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         return
 
     try:
-        # Fetch files
-        files = await client.file_list(parent_id=parent_id)
-        # Sort: Folders first, then Files
+        if search_query:
+            # Search mode
+            # Note: pikpakapi file_list supports name arg for search
+            files = await client.file_list(parent_id=None, name=search_query)
+            title = f"🔍 **搜索结果**: `{search_query}`"
+        else:
+            # Normal list
+            files = await client.file_list(parent_id=parent_id)
+            title = f"📂 **文件列表**\n目录ID: `{parent_id or 'ROOT'}`"
+
+        # Sort: Folders first
         files.sort(key=lambda x: (x.get('kind') != 'drive#folder', x.get('name')))
         
-        # Pagination (10 items per page to keep buttons clean)
         items_per_page = 10
         total_items = len(files)
         start_idx = page * items_per_page
@@ -152,22 +161,22 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
 
         keyboard = []
         
-        # Back button (if not root)
+        # Navigation Buttons (Home / Back)
+        nav_top = []
+        if parent_id or search_query:
+            nav_top.append(InlineKeyboardButton("🏠 首页", callback_data="ls:"))
         if parent_id:
-            # We don't easily know grandparent ID without querying file info of parent, 
-            # so for simplicity "Back" usually goes to Root or we implement a navigation stack.
-            # Here we add a specific "Home" or "Up" button if we can implement 'up' logic later.
-            # For now, "Back to Root" is safer if we don't track stack.
-            keyboard.append([InlineKeyboardButton("🔙 返回根目录", callback_data="ls:")])
+             # PikPak API doesn't give easy parent ID, so we default to Root for "Back" to be safe
+            nav_top.append(InlineKeyboardButton("🔙 返回根目录", callback_data="ls:"))
+        if nav_top: keyboard.append(nav_top)
 
-        # File List Buttons
+        # File Items
         for f in current_files:
             name = f.get('name', 'Unknown')
             fid = f.get('id')
             kind = f.get('kind')
             size = format_bytes(f.get('size', 0))
             
-            # Truncate long names
             display_name = (name[:20] + '..') if len(name) > 20 else name
             
             if kind == 'drive#folder':
@@ -179,17 +188,26 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
             
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=cb_data)])
 
-        # Pagination Buttons
+        # Pagination
         nav_row = []
+        # Construct callback data properly for pagination
+        # Format: page:parent_id:page_num:search_query
+        s_q_safe = search_query if search_query else ""
+        p_id_safe = parent_id if parent_id else ""
+        
         if page > 0:
-            nav_row.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"page:{parent_id or ''}:{page-1}"))
+            nav_row.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"page:{p_id_safe}:{page-1}:{s_q_safe}"))
         if end_idx < total_items:
-            nav_row.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"page:{parent_id or ''}:{page+1}"))
+            nav_row.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"page:{p_id_safe}:{page+1}:{s_q_safe}"))
         if nav_row:
             keyboard.append(nav_row)
 
+        text = f"{title}\n共 {total_items} 个项目"
+        
+        if not current_files and page == 0:
+            text += "\n(空文件夹或无结果)"
+
         reply_markup = InlineKeyboardMarkup(keyboard)
-        text = f"📂 **文件列表**\n当前目录ID: `{parent_id or 'ROOT'}`\n共 {total_items} 个项目"
 
         if edit_msg:
             await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -198,40 +216,39 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
 
     except Exception as e:
         logger.error(e)
-        err_text = f"❌ 获取列表失败: {str(e)}"
+        err_text = f"❌ 读取失败: {str(e)}"
         if edit_msg: await update.callback_query.edit_message_text(err_text)
         else: await context.bot.send_message(update.effective_chat.id, err_text)
 
 async def show_file_options(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id):
     client = await get_client()
     try:
-        # We assume file_id is valid. PikPak API doesn't always have a quick 'get_file_info' 
-        # without listing, but let's try to get download url which contains info.
         data = await client.get_download_url(file_id)
         name = data.get('name', 'Unknown')
         size = format_bytes(data.get('size', 0))
         url = data.get('url') # Direct link
+        mime = data.get('mime_type', '')
         
         text = (
-            f"📄 **文件详情**\n\n"
-            f"名字: `{name}`\n"
-            f"大小: `{size}`\n"
-            f"ID: `{file_id}`"
+            f"📄 **文件操作**\n"
+            f"📝 `{name}`\n"
+            f"📦 `{size}` | `{mime}`"
         )
         
         keyboard = [
             [
                 InlineKeyboardButton("⬇️ TG发送", callback_data=f"act_tg:{file_id}"),
-                InlineKeyboardButton("🔗 获取直链", callback_data=f"act_link:{file_id}")
+                InlineKeyboardButton("▶️ 在线播放", callback_data=f"act_play:{file_id}")
             ],
             [
-                InlineKeyboardButton("🚀 Aria2下载", callback_data=f"act_aria:{file_id}"),
-                InlineKeyboardButton("✏️ 重命名", callback_data=f"act_ren:{file_id}")
+                InlineKeyboardButton("🔗 获取直链", callback_data=f"act_link:{file_id}"),
+                InlineKeyboardButton("🚀 Aria2", callback_data=f"act_aria:{file_id}")
             ],
             [
-                InlineKeyboardButton("🗑 删除文件", callback_data=f"act_del:{file_id}"),
-                InlineKeyboardButton("🔙 返回列表", callback_data="ls:")
-            ]
+                InlineKeyboardButton("✏️ 重命名", callback_data=f"act_ren:{file_id}"),
+                InlineKeyboardButton("🗑 删除", callback_data=f"act_del:{file_id}")
+            ],
+            [InlineKeyboardButton("🔙 返回文件列表", callback_data="ls:")]
         ]
         
         await update.callback_query.edit_message_text(
@@ -242,27 +259,68 @@ async def show_file_options(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     except Exception as e:
         await update.callback_query.answer(f"Error: {str(e)}", show_alert=True)
 
+async def show_offline_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    client = await get_client()
+    if not client: return
+    
+    try:
+        # Fetch tasks (limit 20)
+        tasks = await client.offline_list(limit=20)
+        
+        if not tasks:
+            await context.bot.send_message(update.effective_chat.id, "📉 **当前没有离线任务**", parse_mode='Markdown')
+            return
+            
+        text = "📉 **离线下载任务**\n\n"
+        for task in tasks:
+            name = task.get('name', 'Unknown')
+            # Phase: PHASE_TYPE_RUNNING, PHASE_TYPE_COMPLETE, PHASE_TYPE_ERROR
+            phase = task.get('phase')
+            progress = task.get('progress', 0)
+            status_icon = "⏳"
+            
+            if phase == 'PHASE_TYPE_COMPLETE': status_icon = "✅"
+            elif phase == 'PHASE_TYPE_ERROR': status_icon = "❌"
+            elif phase == 'PHASE_TYPE_RUNNING': status_icon = "🚀"
+            
+            text += f"{status_icon} `{name[:25]}...`\n   └ 进度: {progress}%\n\n"
+            
+        await context.bot.send_message(update.effective_chat.id, text, parse_mode='Markdown')
+        
+    except Exception as e:
+        await context.bot.send_message(update.effective_chat.id, f"❌ 获取任务失败: {e}")
+
 # --- CALLBACK HANDLER ---
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer() # Acknowledge interaction
+    await query.answer()
     
     data = query.data
-    cmd, *args = data.split(':', 1) # simple parsing
-    arg = args[0] if args else None
+    # Use split with maxsplit to safely get arguments
+    parts = data.split(':', 1)
+    cmd = parts[0]
+    arg = parts[1] if len(parts) > 1 else None
 
     if cmd == "ls":
-        # Argument is parent_id (or empty for root)
         parent_id = arg if arg else None
         await show_file_list(update, context, parent_id=parent_id, edit_msg=True)
     
     elif cmd == "page":
-        # args: parent_id:page_num
-        pid, pnum = arg.split(':')
-        parent_id = pid if pid else None
-        page = int(pnum)
-        await show_file_list(update, context, parent_id=parent_id, page=page, edit_msg=True)
+        # Format: page:parent_id:page_num:search_query
+        # We need to split manually based on knowledge of structure
+        # arg string is: "parent_id:page_num:search_query"
+        # Since parent_id or search_query might be empty or None strings
+        p_args = arg.split(':')
+        # p_args[0] = parent_id
+        # p_args[1] = page_num
+        # p_args[2] = search_query (optional)
+        
+        pid = p_args[0] if p_args[0] else None
+        page = int(p_args[1])
+        sq = p_args[2] if len(p_args) > 2 and p_args[2] else None
+        
+        await show_file_list(update, context, parent_id=pid, page=page, edit_msg=True, search_query=sq)
 
     elif cmd == "file":
         await show_file_options(update, context, arg)
@@ -271,13 +329,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         client = await get_client()
         try:
             d = await client.get_download_url(arg)
-            await context.bot.send_message(update.effective_chat.id, f"🔗 **直链**:\n`{d.get('url')}`", parse_mode='Markdown')
+            url = d.get('url')
+            await context.bot.send_message(update.effective_chat.id, f"🔗 **直链 (有时效)**:\n\n`{url}`", parse_mode='Markdown')
+        except Exception as e:
+            await context.bot.send_message(update.effective_chat.id, f"❌ 获取失败: {e}")
+
+    elif cmd == "act_play":
+        client = await get_client()
+        try:
+            d = await client.get_download_url(arg)
+            url = d.get('url')
+            name = d.get('name', 'video')
+            # Create player links
+            # PotPlayer: potplayer://link
+            # VLC: vlc://link
+            # nPlayer: nplayer-http://link (iOS)
+            
+            kb = [
+                [InlineKeyboardButton("VLC 播放", url=f"vlc://{url}")],
+                [InlineKeyboardButton("nPlayer 播放", url=f"nplayer-{url}")],
+                [InlineKeyboardButton("PotPlayer 播放", url=f"potplayer://{url}")]
+            ]
+            await context.bot.send_message(
+                update.effective_chat.id, 
+                f"▶️ **播放: {name}**\n请选择播放器 (需已安装App):", 
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode='Markdown'
+            )
         except Exception as e:
             await context.bot.send_message(update.effective_chat.id, f"❌ 获取失败: {e}")
 
     elif cmd == "act_tg":
-        # Trigger the existing TG upload logic
-        # We construct a mock message command or call function directly
         context.args = [arg]
         await get_file_to_tg(update, context)
 
@@ -286,18 +368,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await download_local_aria2(update, context)
 
     elif cmd == "act_ren":
-        # Send a helper message for rename
         await context.bot.send_message(
             update.effective_chat.id, 
-            f"✏️ **请复制以下命令并修改名称**:\n\n`/rename {arg} 新文件名.ext`", 
+            f"✏️ **请复制并修改**:\n\n`/rename {arg} 新文件名`", 
             parse_mode='Markdown'
         )
 
     elif cmd == "act_del":
         client = await get_client()
         try:
-            # Note: library method might be batch_delete or delete_file
-            await client.delete_file([arg]) # Assume it takes a list
+            await client.delete_file([arg])
+            # Go back to list
             await query.edit_message_text("✅ 文件已删除")
         except Exception as e:
             await query.answer(f"删除失败: {e}", show_alert=True)
@@ -308,7 +389,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update, context): return
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text="👋 **欢迎使用 PikPak 旗舰版 Bot**\n请使用下方菜单操作。",
+        text="👋 **欢迎使用 PikPak 旗舰版 Bot**\n\n📁 管理文件 | ☁️ 查看空间 | 📉 离线任务\n⬇️ 远程下载 | 🚀 本地下载 | ▶️ 在线播放",
         reply_markup=main_menu_keyboard(),
         parse_mode='Markdown'
     )
@@ -317,6 +398,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update, context): return
     text = update.message.text
     
+    # Handle Reply for Search
+    if update.message.reply_to_message and "请输入搜索关键词" in update.message.reply_to_message.text:
+        await show_file_list(update, context, search_query=text)
+        return
+
     # Handle Menu Buttons
     if text == "📂 文件管理":
         await show_file_list(update, context, parent_id=None)
@@ -324,15 +410,24 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await space_info(update, context)
     elif text == "🗑 清空回收站":
         await empty_trash(update, context)
+    elif text == "📉 离线任务":
+        await show_offline_tasks(update, context)
+    elif text == "🔍 搜索文件":
+        await context.bot.send_message(
+            update.effective_chat.id, 
+            "🔍 **请输入搜索关键词**:", 
+            reply_markup=ForceReply(selective=True),
+            parse_mode='Markdown'
+        )
     elif text == "➕ 添加任务":
-        await context.bot.send_message(update.effective_chat.id, "📥 **请直接发送链接** (磁力/HTTP/TikTok/Twitter)...")
+        await context.bot.send_message(update.effective_chat.id, "📥 **请发送链接** (磁力/HTTP/TikTok)...")
     elif text == "⚙️ 帮助/设置":
         help_txt = (
-            "🛠 **高级命令**:\n"
-            "`/mkdir <名>` - 建文件夹\n"
+            "🛠 **命令列表**:\n"
+            "`/mkdir <名>` - 新建文件夹\n"
             "`/mv <文件ID> <目录ID>` - 移动\n"
             "`/rename <ID> <名>` - 重命名\n"
-            "`/invite <ID>` - 邀请用户"
+            "`/invite <ID>` - 授权新用户"
         )
         await context.bot.send_message(update.effective_chat.id, help_txt, parse_mode='Markdown')
     else:
@@ -349,20 +444,19 @@ async def mkdir_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client = await get_client()
     if client:
         try:
-            # parent_id=None means root
             await client.create_folder(name=name) 
             await context.bot.send_message(update.effective_chat.id, f"✅ 文件夹 `{name}` 创建成功", parse_mode='Markdown')
         except Exception as e:
             await context.bot.send_message(update.effective_chat.id, f"❌ 创建失败: {e}")
 
-# --- REUSED/MODIFIED ACTIONS ---
+# --- ACTION LOGIC ---
 
 async def handle_download_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     if not lines: return
 
-    status_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=f"📥 处理 {len(lines)} 个任务...")
+    status_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=f"📥 正在解析 {len(lines)} 个链接...")
     
     client = await get_client()
     if not client:
@@ -372,7 +466,6 @@ async def handle_download_links(update: Update, context: ContextTypes.DEFAULT_TY
     success = 0
     for link in lines:
         final = link
-        # Optional: yt-dlp parsing
         if YTDLP_AVAILABLE and any(x in link for x in ['youtube','tiktok','twitter','x.com']):
             parsed = extract_direct_url_with_ytdlp(link)
             if parsed: final = parsed
@@ -384,21 +477,16 @@ async def handle_download_links(update: Update, context: ContextTypes.DEFAULT_TY
     await context.bot.edit_message_text(
         chat_id=update.effective_chat.id, 
         message_id=status_msg.message_id, 
-        text=f"✅ **任务提交完成**\n成功: {success}/{len(lines)}",
+        text=f"✅ **已提交 {success}/{len(lines)} 个任务**\n请点击 [📉 离线任务] 查看进度。",
         parse_mode='Markdown'
     )
 
 async def get_file_to_tg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Refactored to handle both Command and Callback context"""
-    # Logic is complex because CallbackQuery doesn't have same attrs as Message
-    # We use effective_chat.id
     chat_id = update.effective_chat.id
-    
-    # args comes from context.args set in callback handler, or command args
     if not context.args: return
     file_id = context.args[0]
 
-    msg = await context.bot.send_message(chat_id=chat_id, text="⏳ 正在下载到服务器中转 (限50MB)...")
+    msg = await context.bot.send_message(chat_id=chat_id, text="⏳ 下载中 (中转)...")
     
     client = await get_client()
     if not client: return
@@ -410,7 +498,7 @@ async def get_file_to_tg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         size = int(data.get('size', 0))
 
         if size > 50 * 1024 * 1024:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=f"⚠️ 文件过大 ({format_bytes(size)})，Telegram 限制 50MB。")
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=f"⚠️ 文件 > 50MB ({format_bytes(size)})，无法通过 Bot 发送。\n请使用 [🔗 获取直链] 或 [🚀 Aria2]。")
             return
 
         r = requests.get(url, stream=True)
@@ -421,7 +509,7 @@ async def get_file_to_tg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for chunk in r.iter_content(chunk_size=8192):
                 f.write(chunk)
         
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text="⬆️ 上传中...")
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text="⬆️ 上传到 Telegram...")
         await context.bot.send_document(chat_id=chat_id, document=open(local_path, 'rb'), filename=name)
         
         os.remove(local_path)
@@ -450,7 +538,7 @@ async def download_local_aria2(update: Update, context: ContextTypes.DEFAULT_TYP
         
         await context.bot.send_message(
             chat_id=chat_id, 
-            text=f"🚀 **Aria2 任务已启动**\n文件: `{name}`",
+            text=f"🚀 **Aria2 已启动**\n文件: `{name}`\n位置: `{os.path.abspath(DOWNLOAD_PATH)}`",
             parse_mode='Markdown'
         )
     except Exception as e:
@@ -522,15 +610,13 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('mv', move_file))
     application.add_handler(CommandHandler('invite', invite_user))
     
-    # Old text commands for compatibility
+    # Compatibility Commands
     application.add_handler(CommandHandler('ls', lambda u,c: show_file_list(u,c,None)))
-    application.add_handler(CommandHandler('space', space_info))
-    application.add_handler(CommandHandler('trash', empty_trash))
+    application.add_handler(CommandHandler('search', lambda u,c: show_file_list(u,c,search_query=" ".join(c.args) if c.args else None)))
+    application.add_handler(CommandHandler('tasks', show_offline_tasks))
     
-    # Callbacks (Buttons)
+    # Callbacks & Text
     application.add_handler(CallbackQueryHandler(handle_callback))
-    
-    # Text Handler (Menu Buttons & Links)
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
     
     print(f"PikPak Bot Ultimate Started. Admin: {ADMIN_ID}")
