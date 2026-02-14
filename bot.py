@@ -68,12 +68,14 @@ except ImportError:
 # Global Client Cache
 pikpak_client = None
 
-async def get_client():
+async def get_client(force_refresh=False):
     global pikpak_client
     if not PIKPAK_AVAILABLE: return None
-    if pikpak_client is None:
+    
+    if pikpak_client is None or force_refresh:
         try:
             logger.info(f"Logging in as {PIKPAK_USER}...")
+            # Re-initialize client
             pikpak_client = PikPakApi(username=PIKPAK_USER, password=PIKPAK_PASS)
             await pikpak_client.login()
             logger.info("PikPak Login Successful")
@@ -154,14 +156,16 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         next_page_token = None
         
         # Determine parameters
-        kwargs = {'limit': 100} # Fetch more items to avoid empty pages
+        kwargs = {}
         if parent_id: kwargs['parent_id'] = parent_id
         if search_query: kwargs['name'] = search_query
 
         # Call API
+        # Removed limit argument as it caused TypeError on some library versions
         resp = await client.file_list(**kwargs)
         
         # Handle Response (Dict vs List)
+        # Fix: Ensure files is always a list to prevent 'dict object has no attribute sort'
         if isinstance(resp, dict):
             files = resp.get('files', [])
             next_page_token = resp.get('next_page_token')
@@ -169,6 +173,12 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
             files = resp
         else:
             logger.error(f"Unknown API response type: {type(resp)}")
+            files = []
+
+        # Double check to ensure files is a list
+        if not isinstance(files, list):
+            # If files came back as None or something else from .get()
+            files = []
 
         title = f"🔍 **搜索**: `{search_query}`" if search_query else f"📂 **目录**: `{parent_id or 'ROOT'}`"
 
@@ -245,7 +255,14 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
 
     except Exception as e:
         logger.error(f"File list error: {e}", exc_info=True)
-        err_text = f"❌ 读取失败: {str(e)}"
+        # Attempt to recover auth if 401
+        if "401" in str(e) or "auth" in str(e).lower():
+            # This is a basic retry hint, in real app we might recursive call once
+            err_text = "❌ 认证过期，请重试 (正在尝试重新登录...)"
+            asyncio.create_task(get_client(force_refresh=True))
+        else:
+            err_text = f"❌ 读取失败: {str(e)}"
+            
         if edit_msg: await update.callback_query.edit_message_text(err_text)
         else: await context.bot.send_message(update.effective_chat.id, err_text)
 
@@ -297,7 +314,8 @@ async def show_offline_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     try:
         # Fetch tasks
-        resp = await client.offline_list(limit=20)
+        # Removed limit argument
+        resp = await client.offline_list()
         
         # Handle dict response
         if isinstance(resp, dict):
@@ -305,6 +323,10 @@ async def show_offline_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE)
         elif isinstance(resp, list):
             tasks = resp
         else:
+            tasks = []
+            
+        # Ensure tasks is a list
+        if not isinstance(tasks, list):
             tasks = []
         
         if not tasks:
