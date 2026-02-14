@@ -1,3 +1,4 @@
+
 #!/bin/bash
 
 # Color codes
@@ -8,89 +9,61 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}=========================================${NC}"
-echo -e "${GREEN}    PikPak Termux Bot - 部署脚本        ${NC}"
+echo -e "${GREEN}    PikPak Termux Bot + AList 部署      ${NC}"
 echo -e "${GREEN}=========================================${NC}"
 
-# Define Config Path (Parent Directory)
+# Define Config Path
 ENV_FILE="../.env"
 
 # 1. Update packages
-echo -e "\n${CYAN}[1/6] 检查系统环境...${NC}"
-# Attempt to fix repo issues automatically if update fails
+echo -e "\n${CYAN}[1/7] 检查系统环境...${NC}"
 pkg update -y || termux-change-repo
 
-# 2. Install Python & Node.js (for PM2)
-echo -e "\n${CYAN}[2/6] 安装运行环境 (Python & Node.js)...${NC}"
-if ! command -v python >/dev/null 2>&1; then
-    pkg install python -y
-fi
-if ! command -v node >/dev/null 2>&1; then
-    echo -e "${GREEN}[+] 安装 Node.js (用于 PM2 管理)...${NC}"
-    pkg install nodejs -y
-fi
+# 2. Install Python & Node.js
+echo -e "\n${CYAN}[2/7] 安装运行环境...${NC}"
+if ! command -v python >/dev/null 2>&1; then pkg install python -y; fi
+if ! command -v node >/dev/null 2>&1; then pkg install nodejs -y; fi
 
-# 3. Install System Tools (Git, FFmpeg, Aria2, PM2)
-echo -e "\n${CYAN}[3/6] 安装系统工具...${NC}"
-
-if ! command -v git >/dev/null 2>&1; then
-    pkg install git -y
-fi
-
-if ! command -v ffmpeg >/dev/null 2>&1; then
-    echo -e "${GREEN}[+] 安装 FFmpeg...${NC}"
-    pkg install ffmpeg -y
-fi
-
-if ! command -v aria2c >/dev/null 2>&1; then
-    echo -e "${GREEN}[+] 安装 Aria2...${NC}"
-    pkg install aria2 -y
-fi
+# 3. Install System Tools
+echo -e "\n${CYAN}[3/7] 安装系统工具...${NC}"
+for pkg in git ffmpeg aria2 wget tar; do
+    if ! command -v $pkg >/dev/null 2>&1; then
+        echo -e "${GREEN}[+] 安装 $pkg...${NC}"
+        pkg install $pkg -y
+    fi
+done
 
 if ! command -v pm2 >/dev/null 2>&1; then
-    echo -e "${GREEN}[+] 安装 PM2 进程管理器...${NC}"
+    echo -e "${GREEN}[+] 安装 PM2...${NC}"
     npm install pm2 -g
+fi
+
+# 4. Install AList
+echo -e "\n${CYAN}[4/7] 安装 AList...${NC}"
+if [ -f "alist" ]; then
+    echo -e "${GREEN}[-] AList 已安装${NC}"
 else
-    echo -e "${GREEN}[-] PM2 已安装${NC}"
-fi
-
-# 4. Install Python Dependencies
-echo -e "\n${CYAN}[4/6] 安装 Python 依赖...${NC}"
-echo -e "${YELLOW}正在安装依赖 (使用 PyPI 源)...${NC}"
-
-# Skip pip upgrade on Termux to avoid permission errors
-# pip install --upgrade pip
-
-# Install requirements
-pip install -r requirements.txt
-
-if [ $? -ne 0 ]; then
-    echo -e "\n${RED}❌ 依赖安装失败！${NC}"
-    echo -e "${YELLOW}可能原因：${NC}"
-    echo -e "1. 网络连接不稳定"
-    echo -e "2. Termux 源配置问题"
-    echo -e "\n${CYAN}建议尝试：${NC}"
-    echo -e "• 切换网络 (WiFi/流量)"
-    echo -e "• 手动运行: pip install -r requirements.txt"
-    exit 1
-fi
-
-# 5. Interactive Configuration
-echo -e "\n${CYAN}[5/6] 配置 Bot 信息${NC}"
-echo -e "配置文件路径: ${YELLOW}$ENV_FILE${NC}"
-
-if [ -f "$ENV_FILE" ]; then
-    echo -e "${YELLOW}检测到已有配置文件。${NC}"
-    read -p "是否重新配置? (y/n): " reconfig
-    if [[ "$reconfig" == "y" ]]; then
-        rm "$ENV_FILE"
+    echo -e "${YELLOW}正在下载 AList (Android/Arm64)...${NC}"
+    # Download latest release for termux (usually arm64)
+    wget https://github.com/alist-org/alist/releases/latest/download/alist-android-arm64.tar.gz -O alist.tar.gz
+    if [ $? -eq 0 ]; then
+        tar -zxvf alist.tar.gz
+        rm alist.tar.gz
+        chmod +x alist
+        echo -e "${GREEN}[+] AList 安装成功${NC}"
     else
-        echo "跳过配置..."
+        echo -e "${RED}❌ AList 下载失败，请检查网络 (Github连接)${NC}"
     fi
 fi
 
+# 5. Install Python Dependencies
+echo -e "\n${CYAN}[5/7] 安装 Python 依赖...${NC}"
+pip install -r requirements.txt
+
+# 6. Configuration
+echo -e "\n${CYAN}[6/7] 配置 Bot 信息${NC}"
 if [ ! -f "$ENV_FILE" ]; then
     echo -e "${YELLOW}请输入以下信息:${NC}"
-    
     read -p "Telegram Bot Token: " BOT_TOKEN
     read -p "Telegram Admin ID (数字ID): " ADMIN_ID
     read -p "PikPak 用户名/邮箱: " PIKPAK_USER
@@ -100,16 +73,21 @@ if [ ! -f "$ENV_FILE" ]; then
     echo "ADMIN_ID=$ADMIN_ID" >> "$ENV_FILE"
     echo "PIKPAK_USER=$PIKPAK_USER" >> "$ENV_FILE"
     echo "PIKPAK_PASS=$PIKPAK_PASS" >> "$ENV_FILE"
-    
-    echo -e "${GREEN}[+] 配置文件已生成${NC}"
 fi
 
-# 6. Finalize
-echo -e "\n${CYAN}[6/6] 设置完成${NC}"
+# 7. Finalize
+echo -e "\n${CYAN}[7/7] 设置完成${NC}"
 chmod +x start.sh
 mkdir -p downloads
 
+# Generate AList password once
+if [ -f "alist" ]; then
+    echo -e "${YELLOW}正在初始化 AList 密码...${NC}"
+    ./alist admin set 123456 >/dev/null 2>&1
+    echo -e "${GREEN}✅ AList 初始密码已重置为: 123456${NC}"
+    echo -e "${GREEN}   (您可以稍后在后台修改)${NC}"
+fi
+
 echo -e "\n${GREEN}=========================================${NC}"
 echo -e "${GREEN}   ✅ 部署成功!   ${NC}"
-echo -e "${GREEN}=========================================${NC}"
-echo -e "请运行 ${CYAN}./start.sh${NC} 启动机器人 (包含自动后台运行配置)。"
+echo -e "请运行 ${CYAN}./start.sh${NC} 启动所有服务。"

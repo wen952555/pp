@@ -1,11 +1,12 @@
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ForceReply
 from telegram.ext import ContextTypes
-from .config import check_auth
+from .config import check_auth, WEB_PORT
 from .accounts import account_mgr
+from .utils import get_local_ip
 from .handlers_file import (
     show_file_list, show_file_options, generate_playlist, 
-    deduplicate_folder
+    deduplicate_folder, initiate_regex_rename, process_regex_rename, calculate_folder_size
 )
 from .handlers_task import show_offline_tasks, handle_task_action, add_download_task
 
@@ -24,7 +25,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update, context): return
     await context.bot.send_message(
         update.effective_chat.id, 
-        "👋 **PikPak Ultimate Bot**\n全能文件管理/离线下载/Web播放/去重", 
+        "👋 **PikPak Ultimate Bot + AList**\n全能文件管理/离线下载/Web播放/去重", 
         reply_markup=main_menu_keyboard(), 
         parse_mode='Markdown'
     )
@@ -61,6 +62,24 @@ async def show_accounts_menu(update, context):
     else:
         await context.bot.send_message(update.effective_chat.id, msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
+async def show_alist_info(update, context):
+    ip = get_local_ip()
+    text = (
+        "🗂️ **AList 本地服务**\n\n"
+        f"🔗 地址: `http://{ip}:5244`\n"
+        "🔑 默认密码: `123456` (若脚本设置成功)\n\n"
+        "⚠️ **如何挂载 PikPak?**\n"
+        "1. 浏览器打开 AList 地址并登录\n"
+        "2. 存储 -> 添加 -> 驱动选择 PikPak\n"
+        "3. 挂载路径: `/PikPak`\n"
+        "4. 填入你的 PikPak 账号密码\n\n"
+        "💡 挂载后可在本地播放器中使用 WebDAV 观看。"
+    )
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode='Markdown')
+    else:
+        await context.bot.send_message(update.effective_chat.id, text, parse_mode='Markdown')
+
 # --- CALLBACK ROUTER ---
 async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -68,7 +87,6 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = update.effective_user.id
     
-    # Split Command
     parts = data.split(':', 1)
     cmd = parts[0]
     arg = parts[1] if len(parts) > 1 else None
@@ -77,17 +95,20 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cmd == "ls": await show_file_list(update, context, parent_id=arg, edit_msg=True)
     elif cmd == "file": await show_file_options(update, context, arg)
     elif cmd == "page":
-        # Format: page:parent_id:page_num:search_query
         p = arg.split(':')
         pid = p[0] if p[0] else None
         p_num = int(p[1])
         sq = p[2] if len(p) > 2 else None
         await show_file_list(update, context, parent_id=pid, page=p_num, search_query=sq, edit_msg=True)
     
-    # File Tools
+    # Advanced Tools
     elif cmd == "tool_m3u": await generate_playlist(update, context, arg, 'm3u')
     elif cmd == "tool_strm": await generate_playlist(update, context, arg, 'strm')
     elif cmd == "tool_dedupe": await deduplicate_folder(update, context, arg)
+    elif cmd == "tool_size": await calculate_folder_size(update, context, arg)
+    elif cmd == "tool_regex": await initiate_regex_rename(update, context, arg)
+    elif cmd == "tool_alist": await show_alist_info(update, context)
+
     elif cmd == "confirm_dedupe":
         ids = context.user_data.get('dedupe_ids')
         if ids:
@@ -170,7 +191,12 @@ async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del context.user_data['renaming_id']
         return
 
-    # 2. Main Menu
+    # 2. State Handling (Regex Rename)
+    if 'regex_context' in context.user_data:
+        await process_regex_rename(update, context, msg)
+        return
+
+    # 3. Main Menu
     if msg == "📂 文件管理": await show_file_list(update, context)
     elif msg == "👥 账号管理": await show_accounts_menu(update, context)
     elif msg == "📉 离线任务": await show_offline_tasks(update, context)
@@ -183,11 +209,12 @@ async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(update.effective_chat.id, f"☁️ 已用: {int(usage/1024**3)}GB / 总共: {int(limit/1024**3)}GB")
     
     elif msg == "🛠 极客工具箱":
-        kb = [[InlineKeyboardButton("📋 AList 配置", callback_data="noop")]] # Just placeholder
+        kb = [[InlineKeyboardButton("🗂️ AList 服务信息", callback_data="tool_alist")]]
         await context.bot.send_message(
             update.effective_chat.id, 
-            "🛠 **极客工具箱**\n- **正则重命名**: 发送 `re:pattern replacement`\n- **AList**: 参见账号信息",
-            parse_mode='Markdown'
+            "🛠 **极客工具箱**\n- **AList**: 获取本地 WebDAV 服务信息\n- **正则重命名**: 请在文件夹内部使用",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(kb)
         )
     
     elif msg == "🧹 垃圾清理":
@@ -202,18 +229,6 @@ async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif msg == "➕ 添加任务":
         await context.bot.send_message(update.effective_chat.id, "📥 请直接发送链接 (Magnet/HTTP) 或 .txt 文件")
-
-    # 3. Regex Rename Command
-    elif msg.startswith("re:"):
-        # Format: re:pattern replacement
-        try:
-            parts = msg[3:].split(' ', 1)
-            if len(parts) == 2:
-                # Logic to apply regex on current folder?
-                # This requires context of "current folder", usually difficult in stateless chat.
-                # We will skip implementation or limit to Root for safety in this demo.
-                await context.bot.send_message(update.effective_chat.id, "⚠️ 批量正则重命名需在特定目录下操作，请等待后续更新。")
-        except: pass
 
     # 4. Link Handling (Add Task)
     elif "http" in msg or "magnet:" in msg:
