@@ -1,5 +1,5 @@
 
-import netifaces
+import socket
 import re
 
 # Try importing yt_dlp
@@ -10,11 +10,14 @@ except ImportError:
     YTDLP_AVAILABLE = False
 
 def get_local_ip():
+    """Get local IP using socket which is more robust on Android/Termux"""
     try:
-        gws = netifaces.gateways()
-        default_iface = gws['default'][netifaces.AF_INET][1]
-        ip_info = netifaces.ifaddresses(default_iface)[netifaces.AF_INET][0]
-        return ip_info['addr']
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Connect to a public DNS server (doesn't actually send data)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
     except:
         return "127.0.0.1"
 

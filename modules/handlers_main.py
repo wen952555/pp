@@ -1,9 +1,11 @@
 
+import os
+import shutil
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ForceReply
 from telegram.ext import ContextTypes
-from .config import check_auth, WEB_PORT
+from .config import check_auth, WEB_PORT, DOWNLOAD_PATH
 from .accounts import account_mgr
-from .utils import get_local_ip
+from .utils import get_local_ip, format_bytes
 from .handlers_file import (
     show_file_list, show_file_options, generate_playlist, 
     deduplicate_folder, initiate_regex_rename, process_regex_rename, calculate_folder_size,
@@ -14,7 +16,7 @@ from .handlers_task import show_offline_tasks, handle_task_action, add_download_
 # --- MENUS ---
 def main_menu_keyboard():
     keyboard = [
-        ["📂 文件管理", "☁️ 空间状态"],
+        ["📂 文件管理", "☁️ 空间/VIP"],
         ["📉 离线任务", "🔍 搜索文件"],
         ["➕ 添加任务", "👥 账号管理"],
         ["🛠 极客工具箱", "🧹 垃圾清理"]
@@ -24,9 +26,16 @@ def main_menu_keyboard():
 # --- START & LOGIN ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update, context): return
+    # Clear any stuck states
+    context.user_data.clear()
+    
     await context.bot.send_message(
         update.effective_chat.id, 
-        "👋 **PikPak Ultimate Bot + AList**\n全能文件管理/离线下载/Web播放/去重", 
+        "👋 **PikPak Ultimate Bot + AList**\n\n"
+        "专为 Termux 打造的全能文件管理助手。\n"
+        "✅ 支持多账号秒传\n"
+        "✅ 支持离线下载管理\n"
+        "✅ 支持正则重命名/去重",
         reply_markup=main_menu_keyboard(), 
         parse_mode='Markdown'
     )
@@ -39,80 +48,159 @@ async def login_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     account_mgr.add_account_credentials(args[0], args[1])
-    # Delete command message for privacy
     try: await update.message.delete()
     except: pass
     
     if await account_mgr.switch_account(update.effective_user.id, args[0]):
         await context.bot.send_message(update.effective_chat.id, f"✅ 登录成功: {args[0]}")
     else:
-        await context.bot.send_message(update.effective_chat.id, "❌ 登录失败")
+        await context.bot.send_message(update.effective_chat.id, "❌ 登录失败，请检查密码")
 
 # --- ACCOUNT UI ---
 async def show_accounts_menu(update, context):
-    accounts = account_mgr.get_accounts_list()
-    active = account_mgr.active_user_map.get(str(update.effective_user.id))
-    
-    kb = []
-    for u in accounts:
-        status = "✅" if u == active else ""
-        # Row: Switch | Delete
-        kb.append([
-            InlineKeyboardButton(f"{status} {u}", callback_data=f"acc_switch:{u}"),
-            InlineKeyboardButton("🗑", callback_data=f"acc_del:{u}")
-        ])
-    
-    kb.append([InlineKeyboardButton("➕ 添加新账号 (交互式)", callback_data="acc_add")])
-    kb.append([InlineKeyboardButton("🔙 关闭", callback_data="close_menu")])
-    
-    msg = f"👥 **多账号管理**\n当前激活: `{active}`\n共 {len(accounts)} 个账号"
-    if update.callback_query:
-        await update.callback_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    else:
-        await context.bot.send_message(update.effective_chat.id, msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    try:
+        accounts = account_mgr.get_accounts_list()
+        active = account_mgr.active_user_map.get(str(update.effective_user.id))
+        
+        kb = []
+        for u in accounts:
+            status = "🟢" if u == active else "⚪️"
+            kb.append([
+                InlineKeyboardButton(f"{status} {u}", callback_data=f"acc_switch:{u}"),
+                InlineKeyboardButton("❌ 删除", callback_data=f"acc_del:{u}")
+            ])
+        
+        kb.append([InlineKeyboardButton("➕ 添加新账号", callback_data="acc_add")])
+        kb.append([InlineKeyboardButton("ℹ️ 查看邀请链接", callback_data="acc_invite")])
+        kb.append([InlineKeyboardButton("🔙 关闭", callback_data="close_menu")])
+        
+        msg = f"👥 **多账号管理**\n当前激活: `{active}`\n共 {len(accounts)} 个账号"
+        
+        if update.callback_query:
+            await update.callback_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        else:
+            await context.bot.send_message(update.effective_chat.id, msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    except Exception as e:
+        await context.bot.send_message(update.effective_chat.id, f"❌ 加载账号列表失败: {e}")
 
 async def initiate_add_account(update, context):
     context.user_data['adding_account'] = True
-    text = "👤 **添加新账号**\n\n请回复: `邮箱 密码`\n(例如: `test@gmail.com 123456`)\n\n⚠️ 为了安全，Bot 会尝试在处理后删除您的回复。"
-    await update.callback_query.edit_message_text(text, reply_markup=ForceReply(selective=True), parse_mode='Markdown')
+    
+    text = (
+        "👤 **添加新账号**\n\n"
+        "请直接回复账号和密码，用空格分开。\n"
+        "格式: `邮箱 密码`\n\n"
+        "点击下方按钮取消:"
+    )
+    kb = [[InlineKeyboardButton("❌ 取消操作", callback_data="cancel_state")]]
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    else:
+        await context.bot.send_message(update.effective_chat.id, text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def process_add_account(update, context, text):
-    del context.user_data['adding_account']
     try:
+        # Try split by space first, then newline
         parts = text.split()
         if len(parts) < 2:
-            await context.bot.send_message(update.effective_chat.id, "❌ 格式错误，请重新添加")
+            parts = text.split('\n')
+            
+        if len(parts) < 2:
+            await context.bot.send_message(update.effective_chat.id, "❌ 格式错误，请回复: `邮箱 密码`", parse_mode='Markdown')
             return
         
-        email = parts[0]
-        password = parts[1]
+        email = parts[0].strip()
+        password = parts[1].strip()
         
         # Privacy delete
         try: await update.message.delete()
         except: pass
         
         account_mgr.add_account_credentials(email, password)
-        await context.bot.send_message(update.effective_chat.id, f"✅ 已添加账号: `{email}`\n可在 [👥 账号管理] 中切换。", parse_mode='Markdown')
+        
+        # Clear state
+        if 'adding_account' in context.user_data:
+            del context.user_data['adding_account']
+            
+        await context.bot.send_message(update.effective_chat.id, f"✅ 已保存账号: `{email}`\n正在尝试登录...", parse_mode='Markdown')
+        
+        # Try auto login/switch
+        if await account_mgr.switch_account(update.effective_user.id, email):
+             await context.bot.send_message(update.effective_chat.id, "🎉 登录验证成功！")
+        else:
+             await context.bot.send_message(update.effective_chat.id, "⚠️ 账号已保存，但登录验证失败 (可能是密码错误)。")
+             
     except Exception as e:
-        await context.bot.send_message(update.effective_chat.id, f"❌ 错误: {e}")
+        await context.bot.send_message(update.effective_chat.id, f"❌ 处理失败: {e}")
+        del context.user_data['adding_account']
 
-async def show_alist_info(update, context):
-    ip = get_local_ip()
-    text = (
-        "🗂️ **AList 本地服务**\n\n"
-        f"🔗 地址: `http://{ip}:5244`\n"
-        "🔑 默认密码: `123456` (若脚本设置成功)\n\n"
-        "⚠️ **如何挂载 PikPak?**\n"
-        "1. 浏览器打开 AList 地址并登录\n"
-        "2. 存储 -> 添加 -> 驱动选择 PikPak\n"
-        "3. 挂载路径: `/PikPak`\n"
-        "4. 填入你的 PikPak 账号密码\n\n"
-        "💡 挂载后可在本地播放器中使用 WebDAV 观看。"
-    )
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode='Markdown')
-    else:
-        await context.bot.send_message(update.effective_chat.id, text, parse_mode='Markdown')
+async def show_quota_info(update, context):
+    user_id = update.effective_user.id
+    msg = await context.bot.send_message(update.effective_chat.id, "⏳ 正在获取云端数据...")
+    
+    try:
+        client = await account_mgr.get_client(user_id)
+        if not client:
+            await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text="❌ 未登录账号")
+            return
+
+        # Fetch Quota
+        info = await client.get_quota_info()
+        limit = int(info.get('quota', 1))
+        usage = int(info.get('usage', 0))
+        
+        # Calculate Percentage
+        percent = (usage / limit) * 100
+        bars = int(percent / 10)
+        progress_bar = "▓" * bars + "░" * (10 - bars)
+        
+        # Fetch VIP status (if available in user info)
+        try:
+            me = await client.get_user_info()
+            vip_status = "👑 VIP会员" if me.get('vip_status') == 'ok' else "👤 普通用户"
+            expire = me.get('vip_expire', 'N/A')
+            nickname = me.get('name', 'Unknown')
+        except:
+            vip_status = "❓ 未知状态"
+            expire = "-"
+            nickname = "-"
+
+        text = (
+            f"👤 **{nickname}**\n"
+            f"{vip_status} (到期: {expire})\n\n"
+            f"**空间使用率:**\n"
+            f"`[{progress_bar}] {percent:.1f}%`\n\n"
+            f"已用: `{format_bytes(usage)}`\n"
+            f"总共: `{format_bytes(limit)}`"
+        )
+        
+        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=text, parse_mode='Markdown')
+        
+    except Exception as e:
+        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"❌ 获取状态失败: {e}")
+
+async def show_invite_link(update, context):
+    user_id = update.effective_user.id
+    try:
+        client = await account_mgr.get_client(user_id)
+        # This is a best-guess endpoint or logic, handled gracefully
+        invite_url = "https://mypikpak.com/invite" # Generic fallback
+        await update.callback_query.edit_message_text(
+            f"🤝 **邀请信息**\n\n请前往 App 获取您的专属邀请链接以增加会员天数。\n官方地址: {invite_url}",
+            parse_mode='Markdown'
+        )
+    except:
+        await update.callback_query.answer("功能暂不可用")
+
+async def clear_local_cache(update, context):
+    try:
+        if os.path.exists(DOWNLOAD_PATH):
+            shutil.rmtree(DOWNLOAD_PATH)
+            os.makedirs(DOWNLOAD_PATH)
+        await update.callback_query.answer("✅ 本地临时缓存已清理", show_alert=True)
+    except Exception as e:
+         await update.callback_query.answer(f"❌ 清理失败: {e}", show_alert=True)
 
 # --- CALLBACK ROUTER ---
 async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -125,56 +213,59 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cmd = parts[0]
     arg = parts[1] if len(parts) > 1 else None
 
-    # Routing
-    if cmd == "ls": await show_file_list(update, context, parent_id=arg, edit_msg=True)
-    elif cmd == "file": await show_file_options(update, context, arg)
-    elif cmd == "page":
-        p = arg.split(':')
-        pid = p[0] if p[0] else None
-        p_num = int(p[1])
-        sq = p[2] if len(p) > 2 else None
-        await show_file_list(update, context, parent_id=pid, page=p_num, search_query=sq, edit_msg=True)
+    # Global Cancel
+    if cmd == "cancel_state":
+        context.user_data.clear()
+        await query.edit_message_text("🚫 操作已取消")
+        return
     
-    # Advanced Tools
-    elif cmd == "tool_m3u": await generate_playlist(update, context, arg, 'm3u')
-    elif cmd == "tool_strm": await generate_playlist(update, context, arg, 'strm')
-    elif cmd == "tool_dedupe": await deduplicate_folder(update, context, arg)
-    elif cmd == "tool_size": await calculate_folder_size(update, context, arg)
-    elif cmd == "tool_regex": await initiate_regex_rename(update, context, arg)
-    elif cmd == "tool_alist": await show_alist_info(update, context)
+    # Menus
+    if cmd == "close_menu": await query.delete_message()
 
-    # Cross Account Copy
-    elif cmd == "x_copy_menu": await show_cross_copy_menu(update, context, arg)
-    elif cmd == "x_copy_do":
-        # arg format: file_id:target_user
-        sub_parts = arg.split(':', 1)
-        if len(sub_parts) == 2:
-            await execute_cross_copy(update, context, sub_parts[0], sub_parts[1])
+    # File System
+    elif cmd in ["ls", "file", "page"]:
+        # Relay to handlers_file
+        if cmd == "ls": await show_file_list(update, context, parent_id=arg, edit_msg=True)
+        elif cmd == "file": await show_file_options(update, context, arg)
+        elif cmd == "page":
+            p = arg.split(':')
+            await show_file_list(update, context, parent_id=p[0] or None, page=int(p[1]), search_query=p[2] if len(p)>2 else None, edit_msg=True)
 
-    elif cmd == "confirm_dedupe":
-        ids = context.user_data.get('dedupe_ids')
-        if ids:
+    # File Tools
+    elif cmd.startswith("tool_"):
+        if cmd == "tool_m3u": await generate_playlist(update, context, arg, 'm3u')
+        elif cmd == "tool_strm": await generate_playlist(update, context, arg, 'strm')
+        elif cmd == "tool_dedupe": await deduplicate_folder(update, context, arg)
+        elif cmd == "tool_size": await calculate_folder_size(update, context, arg)
+        elif cmd == "tool_regex": await initiate_regex_rename(update, context, arg)
+        elif cmd == "tool_alist": await show_alist_info(update, context)
+        elif cmd == "tool_clearcache": await clear_local_cache(update, context)
+
+    # File Actions
+    elif cmd.startswith("act_"):
+        if cmd == "act_link":
             client = await account_mgr.get_client(user_id)
             try:
-                await client.delete_file(ids)
-                await query.edit_message_text(f"✅ 已删除 {len(ids)} 个重复文件")
-            except Exception as e: await query.edit_message_text(f"❌ 删除失败: {e}")
-            del context.user_data['dedupe_ids']
-    
-    # File Actions
-    elif cmd == "act_link":
-        client = await account_mgr.get_client(user_id)
-        try:
-            d = await client.get_download_url(arg)
-            if d.get('url'): await context.bot.send_message(update.effective_chat.id, f"🔗 直链:\n`{d['url']}`", parse_mode='Markdown')
-        except: pass
-    elif cmd == "act_ren":
-        context.user_data['renaming_id'] = arg
-        await context.bot.send_message(update.effective_chat.id, "✏️ 请回复新文件名:", reply_markup=ForceReply(selective=True))
-    elif cmd == "act_cut":
-        context.user_data['clipboard'] = {'id': arg, 'op': 'move'}
-        await query.answer("✂️ 已剪切，请导航到目标目录粘贴")
-        await show_file_list(update, context, edit_msg=True)
+                d = await client.get_download_url(arg)
+                if d.get('url'): await context.bot.send_message(update.effective_chat.id, f"🔗 直链:\n`{d['url']}`", parse_mode='Markdown')
+            except: pass
+        elif cmd == "act_ren":
+            context.user_data['renaming_id'] = arg
+            await context.bot.send_message(update.effective_chat.id, "✏️ 请回复新文件名:", reply_markup=ForceReply(selective=True))
+        elif cmd == "act_cut":
+            context.user_data['clipboard'] = {'id': arg, 'op': 'move'}
+            await query.answer("✂️ 已剪切，请导航到目标目录粘贴")
+            await show_file_list(update, context, edit_msg=True)
+        elif cmd == "act_del":
+            client = await account_mgr.get_client(user_id)
+            try:
+                await client.delete_file([arg])
+                await query.edit_message_text("🗑 文件已删除")
+            except: pass
+        elif cmd == "act_tg":
+            await context.bot.send_message(update.effective_chat.id, "⏳ 仅支持通过 /download 下载，TG大文件上传受限。")
+
+    # Paste
     elif cmd == "paste":
         clip = context.user_data.get('clipboard')
         if clip:
@@ -184,18 +275,10 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del context.user_data['clipboard']
                 await query.answer("✅ 移动成功")
                 await show_file_list(update, context, parent_id=arg, edit_msg=True)
-            except: await query.answer("操作失败")
+            except Exception as e: await query.answer(f"操作失败: {e}")
     elif cmd == "paste_cancel":
         if 'clipboard' in context.user_data: del context.user_data['clipboard']
         await show_file_list(update, context, edit_msg=True)
-    elif cmd == "act_del":
-        client = await account_mgr.get_client(user_id)
-        try:
-            await client.delete_file([arg])
-            await query.edit_message_text("🗑 文件已删除")
-        except: pass
-    elif cmd == "act_tg":
-        await context.bot.send_message(update.effective_chat.id, "⏳ 请使用 /download 下载命令或等待未来版本支持大文件发送。")
 
     # Tasks
     elif cmd == "tasks_refresh" or cmd.startswith("task_del"):
@@ -211,18 +294,37 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if account_mgr.remove_account(arg):
             await query.answer(f"🗑 已删除账号: {arg}")
             await show_accounts_menu(update, context)
-        else:
-            await query.answer("❌ 删除失败")
+    elif cmd == "acc_invite": await show_invite_link(update, context)
 
-    elif cmd == "close_menu": await query.delete_message()
-    
-    # Cleanup Commands
+    # Cross Copy
+    elif cmd.startswith("x_copy"):
+        if cmd == "x_copy_menu": await show_cross_copy_menu(update, context, arg)
+        elif cmd == "x_copy_do":
+            sub = arg.split(':', 1)
+            await execute_cross_copy(update, context, sub[0], sub[1])
+
+    # Dedupe Confirm
+    elif cmd == "confirm_dedupe":
+        ids = context.user_data.get('dedupe_ids')
+        if ids:
+            client = await account_mgr.get_client(user_id)
+            try:
+                await client.delete_file(ids)
+                await query.edit_message_text(f"✅ 已删除 {len(ids)} 个重复文件")
+            except: await query.edit_message_text("❌ 删除失败")
+            del context.user_data['dedupe_ids']
+
+    # Trash
     elif cmd == "trash_empty":
         client = await account_mgr.get_client(user_id)
         try:
-            await client.trash_empty()
+            # Try multiple known methods for compatibility
+            if hasattr(client, 'empty_trash'): await client.empty_trash()
+            elif hasattr(client, 'trash_empty'): await client.trash_empty()
+            else: raise Exception("API Method not found")
             await query.edit_message_text("✅ 回收站已清空")
-        except: pass
+        except Exception as e:
+            await query.answer(f"❌ 失败: {e}", show_alert=True)
 
 # --- TEXT ROUTER ---
 async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -230,13 +332,13 @@ async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text.strip()
     user_id = update.effective_user.id
     
-    # 1. Add Account Flow
-    if 'adding_account' in context.user_data:
+    # --- 1. STATE HANDLING (Higher Priority) ---
+    
+    if context.user_data.get('adding_account'):
         await process_add_account(update, context, msg)
         return
 
-    # 2. Rename Flow
-    if 'renaming_id' in context.user_data:
+    if context.user_data.get('renaming_id'):
         client = await account_mgr.get_client(user_id)
         try:
             await client.rename_file(file_id=context.user_data['renaming_id'], name=msg)
@@ -245,45 +347,53 @@ async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del context.user_data['renaming_id']
         return
 
-    # 3. Regex Rename Flow
-    if 'regex_context' in context.user_data:
+    if context.user_data.get('regex_context'):
         await process_regex_rename(update, context, msg)
         return
+        
+    if context.user_data.get('searching'):
+        del context.user_data['searching'] # One-time flag
+        await show_file_list(update, context, search_query=msg)
+        return
 
-    # 4. Main Menus
+    # --- 2. MENU COMMANDS ---
+    
     if msg == "📂 文件管理": await show_file_list(update, context)
+    
     elif msg == "👥 账号管理": await show_accounts_menu(update, context)
+    
     elif msg == "📉 离线任务": await show_offline_tasks(update, context)
-    elif msg == "☁️ 空间状态":
-        client = await account_mgr.get_client(user_id)
-        if client:
-            info = await client.get_quota_info()
-            limit = int(info.get('quota', 0))
-            usage = int(info.get('usage', 0))
-            await context.bot.send_message(update.effective_chat.id, f"☁️ 已用: {int(usage/1024**3)}GB / 总共: {int(limit/1024**3)}GB")
+    
+    elif msg == "☁️ 空间/VIP": await show_quota_info(update, context)
     
     elif msg == "🛠 极客工具箱":
-        kb = [[InlineKeyboardButton("🗂️ AList 服务信息", callback_data="tool_alist")]]
+        kb = [
+            [InlineKeyboardButton("🗂️ AList 服务信息", callback_data="tool_alist")],
+            [InlineKeyboardButton("🧹 清理本地下载缓存", callback_data="tool_clearcache")]
+        ]
         await context.bot.send_message(
             update.effective_chat.id, 
-            "🛠 **极客工具箱**\n- **AList**: 获取本地 WebDAV 服务信息\n- **正则重命名**: 请在文件夹内部使用",
-            parse_mode='Markdown',
+            "🛠 **极客工具箱**",
             reply_markup=InlineKeyboardMarkup(kb)
         )
     
     elif msg == "🧹 垃圾清理":
-        kb = [[InlineKeyboardButton("🗑 清空回收站", callback_data="trash_empty")]]
-        await context.bot.send_message(update.effective_chat.id, "🧹 垃圾清理:", reply_markup=InlineKeyboardMarkup(kb))
+        kb = [[InlineKeyboardButton("🗑 确认清空回收站", callback_data="trash_empty")]]
+        await context.bot.send_message(update.effective_chat.id, "⚠️ 确认要清空回收站吗？操作不可恢复。", reply_markup=InlineKeyboardMarkup(kb))
     
     elif msg == "🔍 搜索文件":
-        await context.bot.send_message(update.effective_chat.id, "🔍 请回复搜索关键词 (支持 `re:正则`):", reply_markup=ForceReply(selective=True))
+        context.user_data['searching'] = True
+        await context.bot.send_message(update.effective_chat.id, "🔍 请发送搜索关键词 (支持 `re:` 正则表达式):", reply_markup=ForceReply(selective=True))
     
-    elif update.message.reply_to_message and "搜索" in update.message.reply_to_message.text:
-        await show_file_list(update, context, search_query=msg)
-
     elif msg == "➕ 添加任务":
-        await context.bot.send_message(update.effective_chat.id, "📥 请直接发送链接 (Magnet/HTTP) 或 .txt 文件")
+        await context.bot.send_message(update.effective_chat.id, "📥 请直接发送链接 (Magnet/HTTP) 或上传 .txt 文件")
 
-    # 5. Link Handling (Add Task)
+    # --- 3. AUTO-DETECT LINKS ---
     elif "http" in msg or "magnet:" in msg:
         await add_download_task(update, context, msg)
+        
+    # --- 4. FALLBACK ---
+    else:
+        # Check reply to search
+        if update.message.reply_to_message and "搜索" in update.message.reply_to_message.text:
+             await show_file_list(update, context, search_query=msg)

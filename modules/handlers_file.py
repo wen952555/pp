@@ -17,24 +17,32 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
     
     if not client:
         text = "⚠️ 未登录，请使用 [👥 账号管理] 登录"
-        if edit_msg: await update.callback_query.edit_message_text(text)
+        if edit_msg: 
+            try: await update.callback_query.edit_message_text(text)
+            except: await context.bot.send_message(update.effective_chat.id, text)
         else: await context.bot.send_message(update.effective_chat.id, text)
         return
 
     try:
-        # Fetching
-        files = []
-        is_regex = search_query and search_query.startswith("re:")
-        api_search_name = search_query if (search_query and not is_regex) else None
-        
-        resp = await client.file_list(parent_id=parent_id, name=api_search_name)
+        # Fetching - Always fetch list and filter client-side for safety
+        resp = await client.file_list(parent_id=parent_id)
         raw_files = resp.get('files', []) if isinstance(resp, dict) else resp
         if not isinstance(raw_files, list): raw_files = []
 
-        if is_regex:
-            pattern = search_query[3:]
-            try: files = [f for f in raw_files if re.search(pattern, f.get('name', ''), re.IGNORECASE)]
-            except: files = []
+        # Client-side Filtering
+        files = []
+        if search_query:
+            is_regex = search_query.startswith("re:")
+            term = search_query[3:] if is_regex else search_query
+            
+            for f in raw_files:
+                fname = f.get('name', '')
+                if is_regex:
+                    try: 
+                        if re.search(term, fname, re.IGNORECASE): files.append(f)
+                    except: pass
+                else:
+                    if term.lower() in fname.lower(): files.append(f)
         else:
             files = raw_files
 
@@ -44,6 +52,9 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         # Pagination
         items_per_page = 10
         total_items = len(files)
+        # Reset page if out of bounds (e.g. after search filter)
+        if page * items_per_page >= total_items and page > 0: page = 0
+            
         start_idx = page * items_per_page
         end_idx = start_idx + items_per_page
         current_files = files[start_idx:end_idx]
@@ -116,7 +127,9 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
 
     except Exception as e:
         err = f"❌ 读取列表失败: {e}"
-        if edit_msg: await update.callback_query.edit_message_text(err)
+        if edit_msg: 
+            try: await update.callback_query.edit_message_text(err)
+            except: await context.bot.send_message(update.effective_chat.id, err)
         else: await context.bot.send_message(update.effective_chat.id, err)
 
 # --- SINGLE FILE ACTIONS ---
@@ -199,7 +212,6 @@ async def execute_cross_copy(update, context, file_id, target_user):
         )
     except Exception as e:
         await update.callback_query.edit_message_text(f"❌ 秒传失败: {e}")
-
 
 # --- ADVANCED TOOLS ---
 
