@@ -1,5 +1,5 @@
 python-telegram-bot
-pikpak-api
+git+https://github.com/mumuzi/pikpak-api.git
 python-dotenv
 yt-dlp
 requests

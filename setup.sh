@@ -15,7 +15,8 @@ ENV_FILE="../.env"
 
 # 1. Update packages
 echo -e "\n${CYAN}[1/6] 检查系统环境...${NC}"
-pkg update -y
+# Attempt to fix repo issues automatically if update fails
+pkg update -y || termux-change-repo
 
 # 2. Install Python & Node.js (for PM2)
 echo -e "\n${CYAN}[2/6] 安装运行环境 (Python & Node.js)...${NC}"
@@ -53,7 +54,7 @@ fi
 
 # 4. Install Python Dependencies
 echo -e "\n${CYAN}[4/6] 安装 Python 依赖...${NC}"
-pip install --upgrade pip
+# Note: In Termux, do not upgrade pip via pip itself.
 pip install -r requirements.txt
 
 # 5. Interactive Configuration
