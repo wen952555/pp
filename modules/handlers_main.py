@@ -1,6 +1,7 @@
 
 import os
 import shutil
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ForceReply
 from telegram.ext import ContextTypes
 from .config import check_auth, WEB_PORT, DOWNLOAD_PATH
@@ -12,6 +13,8 @@ from .handlers_file import (
     show_cross_copy_menu, execute_cross_copy
 )
 from .handlers_task import show_offline_tasks, handle_task_action, add_download_task
+
+logger = logging.getLogger(__name__)
 
 # --- MENUS ---
 def main_menu_keyboard():
@@ -51,10 +54,11 @@ async def login_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try: await update.message.delete()
     except: pass
     
+    msg = await context.bot.send_message(update.effective_chat.id, "⏳ 正在登录...")
     if await account_mgr.switch_account(update.effective_user.id, args[0]):
-        await context.bot.send_message(update.effective_chat.id, f"✅ 登录成功: {args[0]}")
+        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"✅ 登录成功: {args[0]}")
     else:
-        await context.bot.send_message(update.effective_chat.id, "❌ 登录失败，请检查密码")
+        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text="❌ 登录失败，请检查密码")
 
 # --- ACCOUNT UI ---
 async def show_accounts_menu(update, context):
@@ -81,6 +85,7 @@ async def show_accounts_menu(update, context):
         else:
             await context.bot.send_message(update.effective_chat.id, msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     except Exception as e:
+        logger.error(f"Show accounts error: {e}")
         await context.bot.send_message(update.effective_chat.id, f"❌ 加载账号列表失败: {e}")
 
 async def initiate_add_account(update, context):
@@ -88,18 +93,22 @@ async def initiate_add_account(update, context):
     
     text = (
         "👤 **添加新账号**\n\n"
-        "请直接回复账号和密码，用空格分开。\n"
-        "格式: `邮箱 密码`\n\n"
-        "点击下方按钮取消:"
+        "请回复: `邮箱 密码` (空格分隔)\n"
+        "⚠️ 为保护隐私，Bot 会在读取后尝试删除您的回复。"
     )
-    kb = [[InlineKeyboardButton("❌ 取消操作", callback_data="cancel_state")]]
-    
+    # Using ForceReply is more reliable for user input
+    await context.bot.send_message(
+        update.effective_chat.id, 
+        text, 
+        reply_markup=ForceReply(selective=True), 
+        parse_mode='Markdown'
+    )
+    # Answer callback if exists to stop spinner
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    else:
-        await context.bot.send_message(update.effective_chat.id, text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        await update.callback_query.answer()
 
 async def process_add_account(update, context, text):
+    logger.info("Processing add account...")
     try:
         # Try split by space first, then newline
         parts = text.split()
@@ -107,7 +116,8 @@ async def process_add_account(update, context, text):
             parts = text.split('\n')
             
         if len(parts) < 2:
-            await context.bot.send_message(update.effective_chat.id, "❌ 格式错误，请回复: `邮箱 密码`", parse_mode='Markdown')
+            await context.bot.send_message(update.effective_chat.id, "❌ 格式错误，请重新添加。\n格式: `邮箱 密码`", parse_mode='Markdown')
+            # Don't delete state yet, let them try again
             return
         
         email = parts[0].strip()
@@ -117,23 +127,27 @@ async def process_add_account(update, context, text):
         try: await update.message.delete()
         except: pass
         
+        # Save
         account_mgr.add_account_credentials(email, password)
         
         # Clear state
         if 'adding_account' in context.user_data:
             del context.user_data['adding_account']
             
-        await context.bot.send_message(update.effective_chat.id, f"✅ 已保存账号: `{email}`\n正在尝试登录...", parse_mode='Markdown')
+        msg = await context.bot.send_message(update.effective_chat.id, f"✅ 账号 `{email}` 已保存，正在验证登录...", parse_mode='Markdown')
         
         # Try auto login/switch
         if await account_mgr.switch_account(update.effective_user.id, email):
-             await context.bot.send_message(update.effective_chat.id, "🎉 登录验证成功！")
+             await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text="🎉 登录验证成功！")
         else:
-             await context.bot.send_message(update.effective_chat.id, "⚠️ 账号已保存，但登录验证失败 (可能是密码错误)。")
+             await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text="⚠️ 账号已保存，但登录验证失败 (可能是密码错误或网络问题)。")
              
     except Exception as e:
+        logger.error(f"Add account error: {e}")
         await context.bot.send_message(update.effective_chat.id, f"❌ 处理失败: {e}")
-        del context.user_data['adding_account']
+        # Clear state on error to avoid getting stuck
+        if 'adding_account' in context.user_data:
+            del context.user_data['adding_account']
 
 async def show_quota_info(update, context):
     user_id = update.effective_user.id
@@ -147,24 +161,29 @@ async def show_quota_info(update, context):
 
         # Fetch Quota
         info = await client.get_quota_info()
+        # Ensure values are ints
         limit = int(info.get('quota', 1))
         usage = int(info.get('usage', 0))
         
         # Calculate Percentage
+        if limit == 0: limit = 1 # Prevent div by zero
         percent = (usage / limit) * 100
         bars = int(percent / 10)
+        if bars > 10: bars = 10
         progress_bar = "▓" * bars + "░" * (10 - bars)
         
-        # Fetch VIP status (if available in user info)
+        # Fetch VIP status (safely)
+        vip_status = "未知"
+        expire = "-"
+        nickname = "用户"
         try:
             me = await client.get_user_info()
-            vip_status = "👑 VIP会员" if me.get('vip_status') == 'ok' else "👤 普通用户"
-            expire = me.get('vip_expire', 'N/A')
-            nickname = me.get('name', 'Unknown')
-        except:
-            vip_status = "❓ 未知状态"
-            expire = "-"
-            nickname = "-"
+            if me:
+                vip_status = "👑 VIP会员" if me.get('vip_status') == 'ok' else "👤 普通用户"
+                expire = me.get('vip_expire', 'N/A')
+                nickname = me.get('name', 'Unknown')
+        except Exception as e:
+            logger.warning(f"Failed to get VIP info: {e}")
 
         text = (
             f"👤 **{nickname}**\n"
@@ -178,16 +197,16 @@ async def show_quota_info(update, context):
         await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=text, parse_mode='Markdown')
         
     except Exception as e:
+        logger.error(f"Quota error: {e}")
         await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"❌ 获取状态失败: {e}")
 
 async def show_invite_link(update, context):
     user_id = update.effective_user.id
     try:
-        client = await account_mgr.get_client(user_id)
-        # This is a best-guess endpoint or logic, handled gracefully
-        invite_url = "https://mypikpak.com/invite" # Generic fallback
+        # Fallback/Generic link
+        invite_url = "https://mypikpak.com/invite" 
         await update.callback_query.edit_message_text(
-            f"🤝 **邀请信息**\n\n请前往 App 获取您的专属邀请链接以增加会员天数。\n官方地址: {invite_url}",
+            f"🤝 **邀请信息**\n\n请前往 App 获取您的专属邀请链接。\n官方地址: {invite_url}",
             parse_mode='Markdown'
         )
     except:
@@ -205,10 +224,15 @@ async def clear_local_cache(update, context):
 # --- CALLBACK ROUTER ---
 async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    # Don't auto answer here, let individual handlers answer or edit, 
+    # but to be safe against timeout, we can answer empty.
+    try: await query.answer()
+    except: pass
+    
     data = query.data
     user_id = update.effective_user.id
-    
+    print(f"[Callback] {data}") # Debug log
+
     parts = data.split(':', 1)
     cmd = parts[0]
     arg = parts[1] if len(parts) > 1 else None
@@ -254,7 +278,8 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(update.effective_chat.id, "✏️ 请回复新文件名:", reply_markup=ForceReply(selective=True))
         elif cmd == "act_cut":
             context.user_data['clipboard'] = {'id': arg, 'op': 'move'}
-            await query.answer("✂️ 已剪切，请导航到目标目录粘贴")
+            try: await query.answer("✂️ 已剪切，请导航到目标目录粘贴")
+            except: pass
             await show_file_list(update, context, edit_msg=True)
         elif cmd == "act_del":
             client = await account_mgr.get_client(user_id)
@@ -273,9 +298,12 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await client.move_file(file_ids=[clip['id']], parent_id=arg)
                 del context.user_data['clipboard']
-                await query.answer("✅ 移动成功")
+                try: await query.answer("✅ 移动成功")
+                except: pass
                 await show_file_list(update, context, parent_id=arg, edit_msg=True)
-            except Exception as e: await query.answer(f"操作失败: {e}")
+            except Exception as e: 
+                try: await query.answer(f"操作失败: {e}", show_alert=True)
+                except: pass
     elif cmd == "paste_cancel":
         if 'clipboard' in context.user_data: del context.user_data['clipboard']
         await show_file_list(update, context, edit_msg=True)
@@ -286,13 +314,19 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Accounts
     elif cmd == "acc_switch":
+        msg = await context.bot.send_message(update.effective_chat.id, f"⏳ 正在切换至 {arg}...")
         if await account_mgr.switch_account(user_id, arg):
-            await query.answer(f"✅ 已切换: {arg}")
+            try: await context.bot.delete_message(update.effective_chat.id, msg.message_id)
+            except: pass
             await show_accounts_menu(update, context)
+        else:
+             await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"❌ 切换失败，登录错误。")
+
     elif cmd == "acc_add": await initiate_add_account(update, context)
     elif cmd == "acc_del":
         if account_mgr.remove_account(arg):
-            await query.answer(f"🗑 已删除账号: {arg}")
+            try: await query.answer(f"🗑 已删除账号: {arg}")
+            except: pass
             await show_accounts_menu(update, context)
     elif cmd == "acc_invite": await show_invite_link(update, context)
 
@@ -324,7 +358,31 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else: raise Exception("API Method not found")
             await query.edit_message_text("✅ 回收站已清空")
         except Exception as e:
-            await query.answer(f"❌ 失败: {e}", show_alert=True)
+            try: await query.answer(f"❌ 失败: {e}", show_alert=True)
+            except: await context.bot.send_message(update.effective_chat.id, f"❌ 清空失败: {e}")
+
+async def show_alist_info(update, context):
+    try:
+        ip = get_local_ip()
+        text = (
+            "🗂️ **AList 本地服务**\n\n"
+            f"🔗 地址: `http://{ip}:5244`\n"
+            "🔑 默认密码: `123456` (若脚本设置成功)\n\n"
+            "⚠️ **如何挂载 PikPak?**\n"
+            "1. 浏览器打开 AList 地址并登录\n"
+            "2. 存储 -> 添加 -> 驱动选择 PikPak\n"
+            "3. 挂载路径: `/PikPak`\n"
+            "4. 填入你的 PikPak 账号密码\n\n"
+            "💡 挂载后可在本地播放器中使用 WebDAV 观看。"
+        )
+        if update.callback_query:
+            await update.callback_query.edit_message_text(text, parse_mode='Markdown')
+        else:
+            await context.bot.send_message(update.effective_chat.id, text, parse_mode='Markdown')
+    except Exception as e:
+        err_text = f"❌ 获取信息失败: {e}"
+        if update.callback_query: await update.callback_query.edit_message_text(err_text)
+        else: await context.bot.send_message(update.effective_chat.id, err_text)
 
 # --- TEXT ROUTER ---
 async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -332,6 +390,9 @@ async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text.strip()
     user_id = update.effective_user.id
     
+    # Print debug info
+    print(f"[Router Text] User: {user_id}, Msg: {msg}")
+
     # --- 1. STATE HANDLING (Higher Priority) ---
     
     if context.user_data.get('adding_account'):

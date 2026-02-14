@@ -2,7 +2,6 @@
 import os
 import json
 from .config import ACCOUNTS_FILE, logger
-from pikpakapi import PikPakApi
 
 PIKPAK_AVAILABLE = True
 try:
@@ -64,7 +63,9 @@ class AccountManager:
         Get or create authenticated client.
         If specific_username is provided, gets client for that user (ignoring active map).
         """
-        if not PIKPAK_AVAILABLE: return None
+        if not PIKPAK_AVAILABLE: 
+            logger.error("PikPak API library not installed.")
+            return None
         
         username = specific_username
         if not username:
@@ -99,8 +100,8 @@ class AccountManager:
         if target_username in self.accounts:
             self.active_user_map[str(tg_user_id)] = target_username
             # Warm up connection
-            await self.get_client(tg_user_id)
-            return True
+            client = await self.get_client(tg_user_id)
+            return client is not None
         return False
 
 # Singleton Instance

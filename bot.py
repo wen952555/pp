@@ -1,6 +1,7 @@
 
 import sys
 import asyncio
+import logging
 from telegram.ext import (
     ApplicationBuilder, 
     CommandHandler, 
@@ -8,12 +9,19 @@ from telegram.ext import (
     CallbackQueryHandler, 
     filters
 )
-from modules.config import BOT_TOKEN, logger, ADMIN_ID
+from modules.config import BOT_TOKEN, ADMIN_ID
 from modules.player import start_web_server
 from modules.handlers_main import start, login_cmd, router_callback, router_text
 from modules.handlers_file import upload_tg_file
 from modules.handlers_task import add_download_task
 from modules.accounts import account_mgr
+
+# Configure Logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger("BotMain")
 
 # Job: Quota Monitor
 async def check_quota_job(context):
@@ -42,9 +50,12 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(router_callback))
     
     # Text & File Handlers
+    # Text filters exclude commands
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), router_text))
-    app.add_handler(MessageHandler(filters.Document.MimeType("text/plain"), 
-                                   lambda u,c: add_download_task(u,c, u.message.document.get_file().download_as_bytearray().decode())))
+    # File uploads for tasks (torrent/txt)
+    app.add_handler(MessageHandler(filters.Document.MimeType("text/plain") | filters.Document.MimeType("application/x-bittorrent"), 
+                                   lambda u,c: add_download_task(u,c, u.message.document.get_file().download_as_bytearray().decode() if u.message.document.mime_type == "text/plain" else "Torrent file not yet supported via direct upload")))
+    # Other attachments
     app.add_handler(MessageHandler(filters.ATTACHMENT & (~filters.Document.MimeType("text/plain")), upload_tg_file))
 
     # 3. Register Background Jobs
@@ -57,4 +68,5 @@ if __name__ == '__main__':
 
     # 5. Run
     logger.info("🤖 PikPak Ultimate Bot Started")
+    print("Bot is running... Press Ctrl+C to stop")
     app.run_polling()
