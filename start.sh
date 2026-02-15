@@ -16,6 +16,12 @@ if ! command -v termux-chroot >/dev/null 2>&1; then
     pkg install proot -y
 fi
 
+# Check & Install CA Certificates (Crucial for SSL connections)
+if [ ! -f "$PREFIX/etc/tls/cert.pem" ]; then
+    echo -e "${YELLOW}正在安装 ca-certificates (用于解决 SSL 证书问题)...${NC}"
+    pkg install ca-certificates -y
+fi
+
 # Stop existing
 pm2 stop all >/dev/null 2>&1
 pm2 delete all >/dev/null 2>&1
@@ -50,10 +56,13 @@ if [ -f "./cloudflared" ]; then
 #!/bin/bash
 echo "--- Starting Tunnel Wrapper ---"
 export GODEBUG=netdns=go
+# Point Cloudflared to the Termux certificate bundle (mapped to /etc/... by termux-chroot)
+export SSL_CERT_FILE=/etc/tls/cert.pem
 
 while true; do
     echo "[Wrapper] Starting cloudflared with termux-chroot..."
     # termux-chroot simulates standard Linux FS layout
+    # $PREFIX/etc/tls/cert.pem -> /etc/tls/cert.pem
     termux-chroot ./cloudflared tunnel --url http://127.0.0.1:8080 --protocol http2 --edge-ip-version 4 --no-autoupdate --logfile ./cf_tunnel.log
     
     echo "[Wrapper] Cloudflared exited. Sleeping 10s before retry..."

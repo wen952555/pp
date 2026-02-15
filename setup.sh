@@ -26,9 +26,12 @@ if ! command -v node >/dev/null 2>&1; then pkg install nodejs -y; fi
 
 # 3. Install System Tools
 echo -e "\n${CYAN}[3/8] 安装系统工具...${NC}"
-# Added 'proot' for cloudflared DNS compatibility
-for pkg in git ffmpeg aria2 wget tar proot; do
-    if ! command -v $pkg >/dev/null 2>&1; then
+# Added 'proot' and 'ca-certificates' for cloudflared compatibility
+for pkg in git ffmpeg aria2 wget tar proot ca-certificates; do
+    if ! command -v $pkg >/dev/null 2>&1 && [ "$pkg" != "ca-certificates" ]; then
+        echo -e "${GREEN}[+] 安装 $pkg...${NC}"
+        pkg install $pkg -y
+    elif [ "$pkg" == "ca-certificates" ] && [ ! -f "$PREFIX/etc/tls/cert.pem" ]; then
         echo -e "${GREEN}[+] 安装 $pkg...${NC}"
         pkg install $pkg -y
     fi
