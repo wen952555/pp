@@ -130,8 +130,7 @@ if __name__ == '__main__':
             connection_pool_size=10, 
             connect_timeout=10.0, 
             read_timeout=45.0,
-            write_timeout=45.0,
-            http2=True 
+            write_timeout=45.0
         )
     else:
         print("🌐 No Proxy detected (Direct Connection)")
@@ -139,8 +138,7 @@ if __name__ == '__main__':
             connection_pool_size=10, 
             connect_timeout=10.0, 
             read_timeout=45.0,
-            write_timeout=45.0,
-            http2=True
+            write_timeout=45.0
         )
 
     # 2. Build App
