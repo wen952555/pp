@@ -5,6 +5,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ForceReply
 from telegram.ext import ContextTypes
 from .config import check_auth, WEB_PORT, DOWNLOAD_PATH
+from .utils import get_base_url
 from .accounts import account_mgr
 from .handlers_file import (
     show_file_list, show_file_options, generate_playlist, 
@@ -26,7 +27,7 @@ def main_menu_keyboard():
         ["📂 文件管理", "☁️ 空间/VIP"],
         ["📉 离线任务", "🔍 搜索文件"],
         ["➕ 添加任务", "👥 账号管理"],
-        ["🛠 极客工具箱", "🧹 垃圾清理"]
+        ["📊 系统状态", "🛠 极客工具箱"]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -36,12 +37,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update, context): return
     context.user_data.clear()
     
+    # Get Status
+    base_url = get_base_url(WEB_PORT)
+    status_icon = "🟢" if "trycloudflare.com" in base_url else "🟠"
+    net_mode = "Cloudflare 隧道 (公网)" if "trycloudflare.com" in base_url else "局域网 (内网)"
+
     text = (
         "👋 **PikPak Termux Bot**\n"
-        "状态: 🟢 在线\n\n"
+        f"运行状态: 🟢 在线\n"
+        f"网络模式: {status_icon} {net_mode}\n"
+        f"服务地址: `{base_url}`\n\n"
         "👇 点击下方菜单开始使用:"
     )
     await context.bot.send_message(update.effective_chat.id, text, reply_markup=main_menu_keyboard(), parse_mode='Markdown')
+
+async def show_system_status(update, context):
+    msg = await context.bot.send_message(update.effective_chat.id, "🔍 正在检查系统状态...")
+    
+    # Check Web URL
+    base_url = get_base_url(WEB_PORT)
+    is_tunnel = "trycloudflare.com" in base_url
+    
+    # Check Login
+    user_id = update.effective_user.id
+    active_user = account_mgr.active_user_map.get(str(user_id), "未登录")
+    
+    info = (
+        "🖥 **系统状态诊断**\n\n"
+        f"👤 **当前账号**: `{active_user}`\n"
+        f"🌐 **Web 服务**: `{base_url}`\n"
+        f"📡 **连接模式**: {'✅ 隧道 (无视VPN)' if is_tunnel else '⚠️ 局域网 (仅限同WiFi)'}\n"
+        f"🔌 **端口**: `{WEB_PORT}`\n\n"
+        "如果显示为局域网但你希望使用公网，请检查 Cloudflare 是否启动成功，或运行 `cat cf_tunnel.log` 查看错误。"
+    )
+    
+    kb = [[InlineKeyboardButton("🔄 刷新状态", callback_data="status_refresh")]]
+    await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=info, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def login_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update, context): return
@@ -140,6 +171,9 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if cmd == "noop": await query.answer()
         elif cmd == "close_menu": await query.delete_message()
         
+        # System
+        elif cmd == "status_refresh": await show_system_status(update, context)
+
         # File System
         elif cmd == "ls": await show_file_list(update, context, parent_id=arg, edit_msg=True)
         elif cmd == "file": await show_file_options(update, context, arg)
@@ -276,6 +310,7 @@ async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif msg == "👥 账号管理": await show_accounts_menu(update, context)
     elif msg == "📉 离线任务": await show_offline_tasks(update, context)
     elif msg == "☁️ 空间/VIP": await show_quota_info(update, context)
+    elif msg == "📊 系统状态": await show_system_status(update, context)
     elif msg == "🔍 搜索文件":
         context.user_data['searching'] = True
         await context.bot.send_message(update.effective_chat.id, "🔍 请输入关键词:", reply_markup=ForceReply(selective=True))

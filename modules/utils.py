@@ -2,6 +2,9 @@
 import socket
 import re
 import os
+import logging
+
+logger = logging.getLogger("Utils")
 
 # Try importing yt_dlp
 try:
@@ -34,17 +37,24 @@ def get_base_url(port):
         try:
             with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
-                # Find all matches, pick the last one usually, or just any valid one
-                # Pattern for lines like: https://fragrant-smoke-8899.trycloudflare.com
-                matches = re.findall(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', content)
+                # Matches https://[random].trycloudflare.com
+                # Cloudflared log format usually: "INF +--------------------------------------------------------------------------------------------+"
+                # "INF |  Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):  |"
+                # "INF |  https://fragrant-smoke-8899.trycloudflare.com                                            |"
+                matches = re.findall(r'(https://[a-zA-Z0-9-]+\.trycloudflare\.com)', content)
+                
                 if matches:
-                    # Return the most recent one found
-                    return matches[-1]
-        except Exception:
+                    url = matches[-1] # Get the latest one
+                    logger.info(f"Found Cloudflare Tunnel: {url}")
+                    return url
+        except Exception as e:
+            logger.error(f"Error reading tunnel log: {e}")
             pass
             
     # Fallback to local IP
-    return f"http://{get_local_ip()}:{port}"
+    local_ip = get_local_ip()
+    logger.info(f"Using Local IP: {local_ip}")
+    return f"http://{local_ip}:{port}"
 
 def format_bytes(size):
     if not size: return "0 B"
