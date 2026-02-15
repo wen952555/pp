@@ -21,10 +21,10 @@ if [ -f "./cloudflared" ]; then
     touch cf_tunnel.log
     
     # Start Cloudflared
-    # --protocol http2: Fixes issues with QUIC on some networks/VPNs
-    # --no-autoupdate: Prevents restart loops due to update checks
-    # --retries 10: Retry connection if failed
-    pm2 start "./cloudflared tunnel --url http://localhost:8080 --protocol http2 --no-autoupdate --logfile ./cf_tunnel.log" --name "cf-tunnel"
+    # --protocol http2: More stable on mobile networks
+    # --edge-ip-version 4: Force IPv4 to avoid IPv6 timeouts (Fixes "Requesting new quick Tunnel" loop)
+    # --no-autoupdate: Prevent permission errors during update
+    pm2 start "./cloudflared tunnel --url http://localhost:8080 --protocol http2 --edge-ip-version 4 --no-autoupdate --logfile ./cf_tunnel.log" --name "cf-tunnel"
     
     echo -e "${CYAN}⏳ 等待隧道建立 (5秒)...${NC}"
     sleep 5

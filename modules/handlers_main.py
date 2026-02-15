@@ -210,10 +210,13 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
                 
                 client = await account_mgr.get_client(user_id)
-                d = await client.get_download_url(arg)
+                d = None
                 
-                # Retry once if url is missing (maybe token expired)
-                if not d or not d.get('url'):
+                try:
+                    d = await client.get_download_url(arg)
+                except Exception as e:
+                    # Token might be expired, try refresh
+                    logger.info(f"Link failed (try refresh): {e}")
                     client = await account_mgr.get_client(user_id, force_refresh=True)
                     d = await client.get_download_url(arg)
                 
@@ -316,6 +319,11 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- TEXT ROUTER ---
 async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update, context): return
+    
+    # 0. Anti-Spam Rate Limit
+    if is_rate_limited(context.user_data):
+        return
+
     msg = update.message.text.strip()
     print(f"[TXT] {msg} (User: {update.effective_user.id})")
     
