@@ -13,7 +13,8 @@ from .handlers_task import (
     handle_stream_key_action,
     process_stream_input,
     show_key_manager,
-    start_playlist_stream
+    start_playlist_stream,
+    view_stream_log
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -76,8 +77,6 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     # File Selection (Multi-select)
     elif data.startswith("sel:"):
-        # Format: sel:encoded_path
-        # We need to handle this in handlers_file
         await handle_file_selection(update, context, data)
 
     # Start Stream Action
@@ -96,6 +95,8 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await stop_stream(update, context)
         elif data == "stream_refresh":
             await show_stream_status(update, context)
+        elif data == "stream_log":
+            await view_stream_log(update, context)
         else:
             await handle_stream_key_action(update, context)
     

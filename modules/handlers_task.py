@@ -13,6 +13,7 @@ from .accounts import alist_mgr
 # Global Stream State
 stream_sessions = {}
 KEYS_FILE = "stream_keys.json"
+STREAM_LOG_FILE = "stream.log"
 TG_RTMP_BASE = "rtmps://dc5-1.rtmp.t.me/s/"
 
 # --- Key Management ---
@@ -106,9 +107,7 @@ async def process_stream_input(update, context):
         )
     elif mode == 'stream_key_value':
         name = context.user_data.get('temp_key_name')
-        # Combine Base URL + Key
         full_url = f"{TG_RTMP_BASE}{text}"
-        
         save_key(name, full_url)
         context.user_data['selected_key_name'] = name
         context.user_data['selected_key_url'] = full_url
@@ -144,12 +143,8 @@ async def start_playlist_stream(update, context):
         resp = alist_mgr.get_file_info(item['path'])
         if resp and resp.get('code') == 200:
             raw_url = resp['data']['raw_url']
-            # Sign logic
             if resp['data'].get('sign'):
                 raw_url += f"?sign={resp['data']['sign']}"
-            
-            # Simple encoding for spaces in URL if necessary, but requests usually handles it.
-            # However, ffmpeg concat list needs spaces handled or quoted.
             resolved_files.append(raw_url)
     
     if not resolved_files:
@@ -157,10 +152,8 @@ async def start_playlist_stream(update, context):
         return
 
     # 4. Generate Playlist File (concat.txt)
-    # Format: file 'url'
     playlist_content = ""
     for url in resolved_files:
-        # Escape single quotes in URL for ffmpeg protocol
         safe_url = url.replace("'", "'\\''") 
         playlist_content += f"file '{safe_url}'\n"
     
@@ -172,25 +165,35 @@ async def start_playlist_stream(update, context):
     await stop_stream(update, context, silent=True)
 
     # 6. Build FFmpeg Command
-    # -safe 0: Allow unsafe file paths/URLs in concat list
-    # -protocol_whitelist: Allow remote http/https urls in list
+    # -loglevel error: reduce log spam
     cmd = [
         "ffmpeg",
-        "-re", # Realtime reading
+        "-re", 
         "-f", "concat",
         "-safe", "0",
         "-protocol_whitelist", "file,http,https,tcp,tls",
         "-i", playlist_path,
-        "-c", "copy", # Copy codec (Fastest)
+        "-c", "copy",
         "-f", "flv",
+        "-loglevel", "warning", # Only show warnings and errors
         rtmp_url
     ]
 
     try:
-        process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Open log file
+        log_file = open(STREAM_LOG_FILE, "w")
+        
+        # Start process with stderr redirected to log file
+        process = subprocess.Popen(
+            cmd, 
+            stdout=subprocess.DEVNULL, 
+            stderr=log_file
+        )
+        
         stream_sessions[user_id] = {
             'process': process,
             'playlist_file': playlist_path,
+            'log_handle': log_file,
             'count': len(resolved_files)
         }
         
@@ -199,10 +202,13 @@ async def start_playlist_stream(update, context):
             f"🚀 **推流已启动!**\n\n"
             f"📄 文件数: {len(resolved_files)}\n"
             f"🔑 目标: {context.user_data.get('selected_key_name')}\n"
-            f"💡 模式: 列表顺序播放\n\n"
-            f"点击 [⏹ 停止推流] 可结束。",
+            f"📝 日志: 已记录到 `{STREAM_LOG_FILE}`\n\n"
+            f"若画面黑屏，请点击刷新查看日志。",
             parse_mode='Markdown'
         )
+        # Immediately show status panel
+        await show_stream_status(update, context, new_msg=True)
+        
     except Exception as e:
         await context.bot.send_message(update.effective_chat.id, f"❌ 启动失败: {e}")
 
@@ -215,9 +221,13 @@ async def stop_stream(update, context, silent=False):
         try: proc.wait(timeout=5)
         except: proc.kill()
         
-        # Cleanup playlist file
+        # Cleanup
         if os.path.exists(session['playlist_file']):
             os.remove(session['playlist_file'])
+        
+        # Close log file handle
+        try: session['log_handle'].close()
+        except: pass
             
         del stream_sessions[user_id]
         if not silent:
@@ -226,17 +236,53 @@ async def stop_stream(update, context, silent=False):
         if not silent:
             await context.bot.send_message(update.effective_chat.id, "⚪️ 当前没有推流任务")
 
-async def show_stream_status(update, context):
+async def show_stream_status(update, context, new_msg=False):
     user_id = update.effective_user.id
     is_streaming = user_id in stream_sessions and stream_sessions[user_id]['process'].poll() is None
     
-    status = "🟢 正在直播" if is_streaming else "⚪️ 空闲"
-    count = stream_sessions[user_id]['count'] if is_streaming else 0
+    status = "🟢 正在直播" if is_streaming else "⚪️ 空闲 (或已退出)"
+    count = stream_sessions.get(user_id, {}).get('count', 0)
     
     text = f"📺 **推流状态**: {status}\n正在播放: {count} 个文件"
-    kb = [[InlineKeyboardButton("刷新", callback_data="stream_refresh")]]
+    
+    kb = []
+    row1 = [InlineKeyboardButton("🔄 刷新状态", callback_data="stream_refresh")]
     if is_streaming:
-        kb.append([InlineKeyboardButton("⏹ 停止", callback_data="stream_stop")])
+        row1.append(InlineKeyboardButton("⏹ 停止", callback_data="stream_stop"))
+    kb.append(row1)
+    
+    # Add Log View Button
+    kb.append([InlineKeyboardButton("📝 查看日志 (最后20行)", callback_data="stream_log")])
         
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    reply_markup = InlineKeyboardMarkup(kb)
+    
+    if new_msg:
+         await context.bot.send_message(update.effective_chat.id, text, reply_markup=reply_markup, parse_mode='Markdown')
+    elif update.callback_query:
+        try: await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        except: pass
+
+async def view_stream_log(update, context):
+    if not os.path.exists(STREAM_LOG_FILE):
+        await update.callback_query.answer("❌ 暂无日志文件", show_alert=True)
+        return
+        
+    try:
+        # Read last 20 lines
+        with open(STREAM_LOG_FILE, "rb") as f:
+            try: f.seek(-2000, os.SEEK_END) # Go to end approx
+            except: pass # File too small
+            lines = f.readlines()
+            last_lines = lines[-20:]
+            decoded_lines = [l.decode('utf-8', errors='ignore').strip() for l in last_lines]
+            
+        log_content = "\n".join(decoded_lines)
+        if not log_content: log_content = "日志文件为空。"
+        
+        # Escape markdown chars if needed, or use code block
+        msg = f"📝 **FFmpeg 日志 (最后片段):**\n\n```\n{log_content}\n```"
+        
+        await context.bot.send_message(update.effective_chat.id, msg, parse_mode='Markdown')
+        await update.callback_query.answer()
+    except Exception as e:
+        await update.callback_query.answer(f"读取日志失败: {e}", show_alert=True)
