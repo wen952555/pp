@@ -15,16 +15,31 @@ pm2 delete all >/dev/null 2>&1
 
 # 1. Start Cloudflared Tunnel (if installed)
 if [ -f "./cloudflared" ]; then
-    echo -e "${GREEN}启动 Cloudflare Tunnel...${NC}"
+    echo -e "${GREEN}配置 Cloudflare Tunnel...${NC}"
     # Clear previous log
     rm -f cf_tunnel.log
     touch cf_tunnel.log
     
-    # Start Cloudflared
-    # --protocol http2: More stable on mobile networks
-    # --edge-ip-version 4: Force IPv4 to avoid IPv6 timeouts (Fixes "Requesting new quick Tunnel" loop)
-    # --no-autoupdate: Prevent permission errors during update
-    pm2 start "./cloudflared tunnel --url http://localhost:8080 --protocol http2 --edge-ip-version 4 --no-autoupdate --logfile ./cf_tunnel.log" --name "cf-tunnel"
+    # Create a wrapper script to handle retries and prevent PM2 crash loops
+    # This also helps with "Exit code 15" issues by managing the process directly
+    cat > run_tunnel.sh <<EOF
+#!/bin/bash
+echo "--- Starting Tunnel Wrapper ---"
+while true; do
+    echo "[Wrapper] Starting cloudflared..."
+    # 1. Use 127.0.0.1 instead of localhost to bypass local DNS resolver issues
+    # 2. --protocol http2: Most stable for quick tunnels on Android
+    # 3. --no-autoupdate: Prevent permission errors
+    ./cloudflared tunnel --url http://127.0.0.1:8080 --protocol http2 --no-autoupdate --logfile ./cf_tunnel.log
+    
+    echo "[Wrapper] Cloudflared exited. Sleeping 10s before retry..."
+    sleep 10
+done
+EOF
+    chmod +x run_tunnel.sh
+
+    echo -e "${GREEN}启动 Cloudflare Tunnel (Wrapper)...${NC}"
+    pm2 start ./run_tunnel.sh --name "cf-tunnel"
     
     echo -e "${CYAN}⏳ 等待隧道建立 (5秒)...${NC}"
     sleep 5
