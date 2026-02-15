@@ -15,12 +15,13 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from modules.config import BOT_TOKEN, ADMIN_ID, HTTPS_PROXY, check_auth
+from modules.config import BOT_TOKEN, ADMIN_ID, HTTPS_PROXY, check_auth, WEB_PORT
 from modules.player import start_web_server
 from modules.handlers_main import start, login_cmd, router_callback, router_text, reset_state
 from modules.handlers_file import upload_tg_file
 from modules.handlers_task import add_download_task
 from modules.accounts import account_mgr
+from modules.utils import get_base_url
 
 # Configure Logging
 logging.basicConfig(
@@ -77,9 +78,24 @@ async def check_quota_job(context):
     except: pass
 
 async def on_startup(context: ContextTypes.DEFAULT_TYPE):
+    # 1. Start Web Server (inside the same loop)
+    try:
+        await start_web_server()
+        logger.info("✅ Web Server started via on_startup")
+    except Exception as e:
+        logger.error(f"❌ Web Server failed to start: {e}")
+
+    # 2. Notify Admin
     if ADMIN_ID:
         try:
-            await context.bot.send_message(chat_id=ADMIN_ID, text="🤖 **PikPak Bot 已启动**\nTermux 服务已就绪。", parse_mode='Markdown')
+            # Try to get public URL
+            base_url = get_base_url(WEB_PORT)
+            msg = (
+                "🤖 **PikPak Bot 已启动**\n"
+                "Termux 服务已就绪。\n\n"
+                f"🌐 **Web 服务地址**:\n`{base_url}`"
+            )
+            await context.bot.send_message(chat_id=ADMIN_ID, text=msg, parse_mode='Markdown')
         except Exception as e:
             print(f"Failed to send startup message: {e}")
 
@@ -126,17 +142,10 @@ if __name__ == '__main__':
     if app.job_queue:
         app.job_queue.run_repeating(check_quota_job, interval=3600, first=60)
 
-    # 4. Start Web Server
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.create_task(start_web_server())
-    except Exception as e:
-        logger.warning(f"Web server warning: {e}")
-
-    # 5. Run
+    # 4. Run
     print("✅ Bot is running! Waiting for updates...")
     try:
+        # Note: start_web_server is now called in on_startup to ensure correct Event Loop
         app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
     except Exception as e:
         print(f"❌ Polling Error: {e}")
