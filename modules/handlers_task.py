@@ -13,6 +13,7 @@ from .accounts import alist_mgr
 # Global Stream State
 stream_sessions = {}
 KEYS_FILE = "stream_keys.json"
+TG_RTMP_BASE = "rtmps://dc5-1.rtmp.t.me/s/"
 
 # --- Key Management ---
 def load_keys():
@@ -72,7 +73,7 @@ async def handle_stream_key_action(update, context):
         await show_key_manager(update, context)
     elif data == "stream_key_add":
         context.user_data['input_mode'] = 'stream_key_name'
-        await query.message.reply_text("📝 请输入密钥名称:", reply_markup=ForceReply(selective=True))
+        await query.message.reply_text("📝 请输入密钥名称 (例如: 我的频道):", reply_markup=ForceReply(selective=True))
     elif data == "stream_key_del_menu":
         await show_key_delete_menu(update, context)
     elif data.startswith("stream_key_sel:"):
@@ -97,16 +98,24 @@ async def process_stream_input(update, context):
     
     if mode == 'stream_key_name':
         context.user_data['temp_key_name'] = text
-        context.user_data['input_mode'] = 'stream_key_url'
-        await update.message.reply_text(f"🔗 名称: **{text}**\n请输入 rtmp/rtmps 地址:", parse_mode='Markdown', reply_markup=ForceReply(selective=True))
-    elif mode == 'stream_key_url':
+        context.user_data['input_mode'] = 'stream_key_value'
+        await update.message.reply_text(
+            f"🔗 名称: **{text}**\n\n请粘贴 **Telegram 直播密钥**:\n(只需输入密钥部分，无需 rtmp 前缀)\n例如: `123456:AbCdEfG...`", 
+            parse_mode='Markdown', 
+            reply_markup=ForceReply(selective=True)
+        )
+    elif mode == 'stream_key_value':
         name = context.user_data.get('temp_key_name')
-        save_key(name, text)
+        # Combine Base URL + Key
+        full_url = f"{TG_RTMP_BASE}{text}"
+        
+        save_key(name, full_url)
         context.user_data['selected_key_name'] = name
-        context.user_data['selected_key_url'] = text
+        context.user_data['selected_key_url'] = full_url
+        
         del context.user_data['input_mode']
         del context.user_data['temp_key_name']
-        await update.message.reply_text("✅ 密钥已保存并选中！")
+        await update.message.reply_text(f"✅ 密钥已保存并选中！\n地址: `{TG_RTMP_BASE}...`", parse_mode='Markdown')
         await show_key_manager(update, context)
 
 # --- Streaming Logic ---
