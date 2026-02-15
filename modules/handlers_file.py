@@ -9,16 +9,19 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceRe
 from telegram.ext import ContextTypes
 from telegram.error import BadRequest
 from .accounts import account_mgr
-from .config import WEB_PORT, DOWNLOAD_PATH
+from .config import WEB_PORT, DOWNLOAD_PATH, global_cache
 from .utils import get_local_ip, get_base_url, format_bytes
 
 # --- FILE LISTING ---
 async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, parent_id=None, page=0, edit_msg=False, search_query=None):
     user_id = update.effective_user.id
     
+    # Immediate UI Feedback
     if edit_msg and update.callback_query:
         try: 
-            pass 
+            # If page > 0, don't show alert to keep it smooth
+            if page == 0: await update.callback_query.answer("🔄 加载中...")
+            else: await update.callback_query.answer()
         except: pass
 
     client = await account_mgr.get_client(user_id)
@@ -45,35 +48,45 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         active_search = search_query
 
     try:
-        # Fetch Files
-        try:
-            resp = await client.file_list(parent_id=parent_id)
-        except Exception as e:
-            print(f"API Error (1st try): {e}")
-            client = await account_mgr.get_client(user_id, force_refresh=True)
-            if client:
-                resp = await client.file_list(parent_id=parent_id)
-            else:
-                raise e
-
-        raw_files = resp.get('files', []) if isinstance(resp, dict) else resp
-        if not isinstance(raw_files, list): raw_files = []
-
         files = []
-        # Filter if search
-        if active_search:
-            is_regex = active_search.startswith("re:")
-            term = active_search[3:] if is_regex else active_search
-            for f in raw_files:
-                fname = f.get('name', '') or ''
-                if is_regex:
-                    try: 
-                        if re.search(term, fname, re.IGNORECASE): files.append(f)
-                    except: pass
-                else:
-                    if term.lower() in fname.lower(): files.append(f)
+        cache_key = f"files_{user_id}_{parent_id}_{active_search}"
+        
+        # 1. Try Cache
+        cached_data = global_cache.get(cache_key)
+        if cached_data:
+            files = cached_data
         else:
-            files = raw_files
+            # 2. Fetch API
+            try:
+                resp = await client.file_list(parent_id=parent_id)
+            except Exception as e:
+                # Retry logic
+                client = await account_mgr.get_client(user_id, force_refresh=True)
+                if client:
+                    resp = await client.file_list(parent_id=parent_id)
+                else:
+                    raise e
+
+            raw_files = resp.get('files', []) if isinstance(resp, dict) else resp
+            if not isinstance(raw_files, list): raw_files = []
+
+            # Filter if search
+            if active_search:
+                is_regex = active_search.startswith("re:")
+                term = active_search[3:] if is_regex else active_search
+                for f in raw_files:
+                    fname = f.get('name', '') or ''
+                    if is_regex:
+                        try: 
+                            if re.search(term, fname, re.IGNORECASE): files.append(f)
+                        except: pass
+                    else:
+                        if term.lower() in fname.lower(): files.append(f)
+            else:
+                files = raw_files
+            
+            # Save to Cache (TTL 5 mins)
+            global_cache.set(cache_key, files, ttl=300)
 
         # --- Sorting Logic ---
         # Get sort pref: 'name' (default), 'date', 'size'
@@ -94,8 +107,6 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         folders = [f for f in files if f.get('kind') == 'drive#folder']
         non_folders = [f for f in files if f.get('kind') != 'drive#folder']
 
-        reverse_sort = True # Default descending for date/size
-        
         if sort_mode == 'date':
             folders.sort(key=get_date, reverse=True)
             non_folders.sort(key=get_date, reverse=True)
@@ -130,7 +141,8 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         if active_search or parent_id:
              nav_top.append(InlineKeyboardButton("🏠 首页", callback_data="ls:"))
         
-        nav_top.append(InlineKeyboardButton("🔄 刷新", callback_data=f"ls:{refresh_pid}"))
+        # Force refresh button (bypasses cache logic in router)
+        nav_top.append(InlineKeyboardButton("🔄 刷新", callback_data=f"ls_force:{refresh_pid}"))
         
         # Sort Toggle Button (Cycles: Name -> Date -> Size -> Name)
         next_sort_map = {'name': 'date', 'date': 'size', 'size': 'name'}
@@ -208,9 +220,10 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
             try: 
                 await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
             except BadRequest as e:
+                # Ignore message not modified
                 if "not modified" in str(e): pass
-                else: await update.callback_query.answer("⚠️ 加载失败", show_alert=False)
-            except Exception as e:
+                else: pass 
+            except Exception:
                 pass
         else:
             await context.bot.send_message(update.effective_chat.id, text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -225,13 +238,13 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
 
 async def show_file_options(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str):
     if update.callback_query:
-        try: await update.callback_query.edit_message_text("⏳ 获取详情...")
+        try: await update.callback_query.answer("⏳ 获取中...") 
         except: pass
         
     user_id = update.effective_user.id
     client = await account_mgr.get_client(user_id)
     try:
-        # Get base url (refresh log check)
+        # Get base url (using cached version)
         base_url = get_base_url(WEB_PORT)
         
         data = await client.get_download_url(file_id)
@@ -262,10 +275,10 @@ async def show_file_options(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await update.callback_query.edit_message_text(f"❌ 失败: {e}")
 
 async def calculate_folder_size(update, context, folder_id):
-    if update.callback_query: await update.callback_query.answer("计算中...")
+    if update.callback_query: await update.callback_query.answer("后台计算中...")
     user_id = update.effective_user.id
     client = await account_mgr.get_client(user_id)
-    msg = await context.bot.send_message(update.effective_chat.id, "⏳ 正在计算...")
+    msg = await context.bot.send_message(update.effective_chat.id, "⏳ 正在递归计算文件夹大小，请稍候...")
     try:
         resp = await client.file_list(parent_id=folder_id)
         files = resp.get('files', []) if isinstance(resp, dict) else resp
@@ -288,6 +301,10 @@ async def process_regex_rename(update, context, text):
         msg = await context.bot.send_message(update.effective_chat.id, "Processing...")
         resp = await client.file_list(parent_id=folder_id)
         count = 0
+        
+        # Invalidate cache for this folder
+        global_cache.set(f"files_{update.effective_user.id}_{folder_id}_None", None, ttl=0)
+        
         for f in resp.get('files', []):
             new_n = re.sub(pat, repl, f.get('name',''))
             if new_n != f.get('name'):
@@ -298,7 +315,7 @@ async def process_regex_rename(update, context, text):
         await context.bot.send_message(update.effective_chat.id, f"Error: {e}")
 
 async def deduplicate_folder(update, context, folder_id):
-    if update.callback_query: await update.callback_query.answer("Scanning...")
+    if update.callback_query: await update.callback_query.answer("扫描中...")
     client = await account_mgr.get_client(update.effective_user.id)
     msg = await context.bot.send_message(update.effective_chat.id, "🔍 Scanning...")
     try:
@@ -315,7 +332,7 @@ async def deduplicate_folder(update, context, folder_id):
     except: pass
 
 async def generate_playlist(update, context, folder_id, mode='m3u'):
-    if update.callback_query: await update.callback_query.answer("Generating...")
+    if update.callback_query: await update.callback_query.answer("生成中...")
     client = await account_mgr.get_client(update.effective_user.id)
     msg = await context.bot.send_message(update.effective_chat.id, "⏳ Generating...")
     try:
@@ -402,6 +419,10 @@ async def upload_tg_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             # Assuming pikpakapi uses upload_file(path)
             await client.upload_file(local_path)
+            
+            # Clear Cache for current folder so user sees new file
+            global_cache.clear() 
+            
             await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"✅ 上传成功: `{filename}`", parse_mode='Markdown')
         except Exception as e:
              await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"❌ 上传失败: {e}")

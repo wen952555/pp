@@ -20,7 +20,7 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from modules.config import BOT_TOKEN, ADMIN_ID, HTTPS_PROXY, check_auth, WEB_PORT
+from modules.config import BOT_TOKEN, ADMIN_ID, HTTPS_PROXY, check_auth, WEB_PORT, global_cache
 from modules.player import start_web_server
 from modules.handlers_main import start, login_cmd, router_callback, router_text, reset_state
 from modules.handlers_file import upload_tg_file
@@ -31,12 +31,14 @@ from modules.utils import get_base_url
 # Configure Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.WARNING # Less verbose for performance
 )
 logger = logging.getLogger("BotMain")
+logger.setLevel(logging.INFO)
 
-# Silence httpx logger to reduce noise
-logging.getLogger("httpx").setLevel(logging.WARNING)
+# Silence httpx logger to reduce noise and IO
+logging.getLogger("httpx").setLevel(logging.ERROR)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 # Global Error Handler
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -115,24 +117,30 @@ if __name__ == '__main__':
     print("🚀 Starting Bot...")
     
     # 1. Network Configuration (Proxy Support)
-    # Increase timeouts for unstable networks (Termux/Mobile)
+    # Optimized for Mobile/Termux:
+    # - Connect Timeout: 10s (fail fast if network dead)
+    # - Read Timeout: 45s (allow slow data)
+    # - Write Timeout: 45s (allow slow upload)
+    # - Keepalive: 60s
     req = None
     if HTTPS_PROXY:
         print(f"🌐 Using Proxy: {HTTPS_PROXY}")
         req = HTTPXRequest(
             proxy_url=HTTPS_PROXY, 
-            connection_pool_size=8, 
-            connect_timeout=60.0, 
-            read_timeout=60.0,
-            write_timeout=60.0
+            connection_pool_size=10, 
+            connect_timeout=10.0, 
+            read_timeout=45.0,
+            write_timeout=45.0,
+            http2=True 
         )
     else:
         print("🌐 No Proxy detected (Direct Connection)")
         req = HTTPXRequest(
-            connection_pool_size=8, 
-            connect_timeout=60.0, 
-            read_timeout=60.0,
-            write_timeout=60.0
+            connection_pool_size=10, 
+            connect_timeout=10.0, 
+            read_timeout=45.0,
+            write_timeout=45.0,
+            http2=True
         )
 
     # 2. Build App
@@ -169,8 +177,7 @@ if __name__ == '__main__':
         app.run_polling(
             drop_pending_updates=True, 
             allowed_updates=Update.ALL_TYPES,
-            timeout=60, # Long polling timeout
-            read_timeout=60 # HTTP read timeout
+            timeout=40 # Polling timeout
         )
     except Exception as e:
         print(f"❌ Polling Error: {e}")

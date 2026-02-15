@@ -4,7 +4,7 @@ import shutil
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ForceReply
 from telegram.ext import ContextTypes
-from .config import check_auth, WEB_PORT, DOWNLOAD_PATH
+from .config import check_auth, WEB_PORT, DOWNLOAD_PATH, global_cache
 from .utils import get_base_url, is_rate_limited
 from .accounts import account_mgr
 from .handlers_file import (
@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 async def reset_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[CMD] Reset by {update.effective_user.id}")
     context.user_data.clear()
-    await context.bot.send_message(update.effective_chat.id, "✅ 状态已重置，请重新操作。", reply_markup=main_menu_keyboard())
+    global_cache.clear()
+    await context.bot.send_message(update.effective_chat.id, "✅ 状态已重置，缓存已清空。", reply_markup=main_menu_keyboard())
 
 def main_menu_keyboard():
     keyboard = [
@@ -197,14 +198,17 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # File System
         elif cmd == "ls": await show_file_list(update, context, parent_id=arg, edit_msg=True)
+        elif cmd == "ls_force": 
+             # Force refresh by clearing cache for this user/folder combo
+             # Ideally we check cache keys, but a simple way is just to pass a flag to show_file_list
+             # Or manually clear cache
+             global_cache.set(f"files_{user_id}_{arg}_{None}", None, ttl=0) # Invalidate
+             await show_file_list(update, context, parent_id=arg, edit_msg=True)
+             
         elif cmd == "sort_toggle":
-            # arg is sort mode
             account_mgr.set_user_pref(user_id, 'sort', arg)
-            # Find current page parent ID from context? No context. 
-            # We just refresh without parent ID if unknown, or default to root.
-            # Best is to try refreshing current view, but we lost parent_id in this call.
-            # Workaround: Assume root or search. For now just refresh root or last visited if we could track it.
-            # Actually, ls defaults to root/None if arg is missing.
+            # When sorting changes, we still use the cache but re-sort in memory
+            # The show_file_list function handles re-sorting logic on the cached list
             await show_file_list(update, context, edit_msg=True)
             await query.answer(f"已切换排序")
 
@@ -257,9 +261,9 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif cmd == "act_del":
             client = await account_mgr.get_client(user_id)
             await client.delete_file([arg])
+            # Invalidate cache
+            global_cache.clear()
             await query.answer("已删除")
-            # Try to refresh list? We don't know parent, so show root/current list if possible or just say deleted
-            # Ideally we reload previous list, but we don't have state.
             await context.bot.send_message(update.effective_chat.id, "✅ 文件已删除")
 
         elif cmd == "act_cut":
@@ -274,6 +278,7 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 client = await account_mgr.get_client(user_id)
                 await client.move_file([cl['id']], arg)
                 del context.user_data['clipboard']
+                global_cache.clear() # Invalidate
                 await query.answer("成功")
                 await show_file_list(update, context, parent_id=arg, edit_msg=True)
         elif cmd == "paste_cancel":
@@ -284,6 +289,7 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif cmd == "acc_switch":
             await query.answer("切换中...")
             if await account_mgr.switch_account(user_id, arg):
+                global_cache.clear() # Switching account invalidates cache
                 await show_accounts_menu(update, context)
             else: await query.answer("切换失败")
         elif cmd == "acc_add": await initiate_add_account(update, context)
@@ -300,6 +306,7 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif "alist" in cmd: await context.bot.send_message(update.effective_chat.id, f"🗂 AList: http://{WEB_PORT}:5244 (Local IP)")
             elif "clearcache" in cmd: 
                 if os.path.exists(DOWNLOAD_PATH): shutil.rmtree(DOWNLOAD_PATH)
+                global_cache.clear()
                 await query.answer("缓存已清空")
 
         # Tasks
@@ -316,6 +323,7 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if ids:
                 client = await account_mgr.get_client(user_id)
                 await client.delete_file(ids)
+                global_cache.clear()
             del context.user_data['dedupe_ids']
             await query.answer("清理完成")
         
@@ -353,6 +361,7 @@ async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: await client.rename_file(context.user_data['renaming_id'], msg)
         except: pass
         del context.user_data['renaming_id']
+        global_cache.clear()
         await context.bot.send_message(update.effective_chat.id, "✅ 重命名成功")
         return
 

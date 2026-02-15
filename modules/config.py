@@ -1,6 +1,7 @@
 
 import os
 import logging
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 from telegram import Update
@@ -28,9 +29,33 @@ HTTPS_PROXY = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
 # Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.WARNING # Changed to WARNING to reduce I/O lag on Termux
 )
 logger = logging.getLogger("PikPakBot")
+logger.setLevel(logging.INFO)
+
+# --- Simple Memory Cache ---
+class SimpleCache:
+    def __init__(self):
+        self._cache = {}
+
+    def get(self, key):
+        if key in self._cache:
+            data, expiry = self._cache[key]
+            if time.time() < expiry:
+                return data
+            else:
+                del self._cache[key]
+        return None
+
+    def set(self, key, value, ttl=300): # Default 5 mins
+        self._cache[key] = (value, time.time() + ttl)
+
+    def clear(self):
+        self._cache.clear()
+
+# Global Cache Instance
+global_cache = SimpleCache()
 
 # Auth Helper
 def get_whitelist():
@@ -51,16 +76,13 @@ async def check_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool
     user_id = str(update.effective_user.id)
     allowed_ids = get_whitelist()
     
-    # DEBUG PRINT
-    print(f"[DEBUG] Msg from {user_id}. Whitelist: {allowed_ids}")
-
     if not allowed_ids:
-        print("[WARN] Whitelist is empty! Please check ADMIN_ID in .env")
         await context.bot.send_message(chat_id=update.effective_chat.id, text="⛔ **配置错误**: 管理员 ID 未设置，无法使用。")
         return False
 
     if user_id not in allowed_ids:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⛔ 无权访问 (ID: `{user_id}`)")
+        # Silent reject to save resources, or verify strict mode
+        # await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⛔ 无权访问 (ID: `{user_id}`)")
         return False
         
     return True

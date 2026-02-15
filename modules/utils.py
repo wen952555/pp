@@ -26,20 +26,32 @@ def get_local_ip():
     except:
         return "127.0.0.1"
 
+# Cache for base URL to avoid reading file every request
+_cached_url = None
+_last_url_check = 0
+
 def get_base_url(port):
     """
     Tries to find the Cloudflare Tunnel URL first.
     If not found, falls back to Local IP.
+    Cached for 60 seconds.
     """
+    global _cached_url, _last_url_check
+    now = time.time()
+    
+    # Return cache if valid (60s)
+    if _cached_url and (now - _last_url_check < 60):
+        return _cached_url
+
     log_file = "cf_tunnel.log"
+    found_url = None
     
     # Try to find valid trycloudflare.com URL in logs
     if os.path.exists(log_file):
         try:
-            # Optimize: Read only last 20KB instead of full file
-            # This prevents memory/CPU spikes if the log file grows large over weeks of uptime.
+            # Optimize: Read only last 10KB
             file_size = os.path.getsize(log_file)
-            read_size = 1024 * 20 # 20KB
+            read_size = 1024 * 10
             
             with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
                 if file_size > read_size:
@@ -48,19 +60,22 @@ def get_base_url(port):
                 
                 # Matches https://[random].trycloudflare.com
                 matches = re.findall(r'(https://[a-zA-Z0-9-]+\.trycloudflare\.com)', content)
-                
                 if matches:
-                    url = matches[-1] # Get the latest one
-                    return url
-        except Exception as e:
-            logger.error(f"Error reading tunnel log: {e}")
+                    found_url = matches[-1]
+        except Exception:
             pass
             
-    # Fallback to local IP
-    local_ip = get_local_ip()
-    return f"http://{local_ip}:{port}"
+    if found_url:
+        _cached_url = found_url
+    else:
+        # Fallback
+        local_ip = get_local_ip()
+        _cached_url = f"http://{local_ip}:{port}"
+    
+    _last_url_check = now
+    return _cached_url
 
-def is_rate_limited(user_data, limit=0.8):
+def is_rate_limited(user_data, limit=0.5):
     """Simple rate limiter to prevent spamming"""
     now = time.time()
     last = user_data.get('last_interaction', 0)
