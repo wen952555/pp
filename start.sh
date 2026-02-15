@@ -22,6 +22,12 @@ if [ ! -f "$PREFIX/etc/tls/cert.pem" ]; then
     pkg install ca-certificates -y
 fi
 
+# Ensure Dependencies are up to date (Silent install unless error)
+if [ -f "requirements.txt" ]; then
+    # We run pip install to ensure 'python-telegram-bot[job-queue]' is present
+    pip install -r requirements.txt >/dev/null 2>&1
+fi
+
 # Stop existing
 pm2 stop all >/dev/null 2>&1
 pm2 delete all >/dev/null 2>&1

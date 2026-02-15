@@ -35,6 +35,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("BotMain")
 
+# Silence httpx logger to reduce noise
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # Global Error Handler
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
@@ -112,13 +115,25 @@ if __name__ == '__main__':
     print("🚀 Starting Bot...")
     
     # 1. Network Configuration (Proxy Support)
+    # Increase timeouts for unstable networks (Termux/Mobile)
     req = None
     if HTTPS_PROXY:
         print(f"🌐 Using Proxy: {HTTPS_PROXY}")
-        req = HTTPXRequest(proxy_url=HTTPS_PROXY, connection_pool_size=8, connect_timeout=20.0, read_timeout=20.0)
+        req = HTTPXRequest(
+            proxy_url=HTTPS_PROXY, 
+            connection_pool_size=8, 
+            connect_timeout=60.0, 
+            read_timeout=60.0,
+            write_timeout=60.0
+        )
     else:
         print("🌐 No Proxy detected (Direct Connection)")
-        req = HTTPXRequest(connection_pool_size=8, connect_timeout=20.0, read_timeout=20.0)
+        req = HTTPXRequest(
+            connection_pool_size=8, 
+            connect_timeout=60.0, 
+            read_timeout=60.0,
+            write_timeout=60.0
+        )
 
     # 2. Build App
     try:
@@ -151,6 +166,11 @@ if __name__ == '__main__':
     print("✅ Bot is running! Waiting for updates...")
     try:
         # Note: start_web_server is now called in on_startup to ensure correct Event Loop
-        app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+        app.run_polling(
+            drop_pending_updates=True, 
+            allowed_updates=Update.ALL_TYPES,
+            timeout=60, # Long polling timeout
+            read_timeout=60 # HTTP read timeout
+        )
     except Exception as e:
         print(f"❌ Polling Error: {e}")
