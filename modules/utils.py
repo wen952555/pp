@@ -36,14 +36,21 @@ def get_base_url(port):
     # Try to find valid trycloudflare.com URL in logs
     if os.path.exists(log_file):
         try:
+            # Optimize: Read only last 20KB instead of full file
+            # This prevents memory/CPU spikes if the log file grows large over weeks of uptime.
+            file_size = os.path.getsize(log_file)
+            read_size = 1024 * 20 # 20KB
+            
             with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                if file_size > read_size:
+                    f.seek(file_size - read_size)
                 content = f.read()
+                
                 # Matches https://[random].trycloudflare.com
                 matches = re.findall(r'(https://[a-zA-Z0-9-]+\.trycloudflare\.com)', content)
                 
                 if matches:
                     url = matches[-1] # Get the latest one
-                    # logger.info(f"Found Cloudflare Tunnel: {url}")
                     return url
         except Exception as e:
             logger.error(f"Error reading tunnel log: {e}")
@@ -51,7 +58,6 @@ def get_base_url(port):
             
     # Fallback to local IP
     local_ip = get_local_ip()
-    # logger.info(f"Using Local IP: {local_ip}")
     return f"http://{local_ip}:{port}"
 
 def is_rate_limited(user_data, limit=0.8):
