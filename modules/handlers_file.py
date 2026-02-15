@@ -4,6 +4,7 @@ import io
 import zipfile
 import time
 import os
+import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
 from telegram.ext import ContextTypes
 from telegram.error import BadRequest
@@ -17,10 +18,6 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
     
     if edit_msg and update.callback_query:
         try: 
-            # Temporary loading text to prevent "Button already pressed" feeling
-            # But don't do this if we want to be super fast, 
-            # though it helps user know something is happening.
-            # However, for pagination, direct switch is better.
             pass 
         except: pass
 
@@ -33,8 +30,10 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         else: await context.bot.send_message(update.effective_chat.id, text, parse_mode='Markdown')
         return
 
+    # Normalize parent_id
     if parent_id in ["None", "", "root"]: parent_id = None
     
+    # Handle Search Context
     if search_query:
         context.user_data['current_search_query'] = search_query
     
@@ -46,6 +45,7 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         active_search = search_query
 
     try:
+        # Fetch Files
         try:
             resp = await client.file_list(parent_id=parent_id)
         except Exception as e:
@@ -60,6 +60,7 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         if not isinstance(raw_files, list): raw_files = []
 
         files = []
+        # Filter if search
         if active_search:
             is_regex = active_search.startswith("re:")
             term = active_search[3:] if is_regex else active_search
@@ -74,8 +75,43 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         else:
             files = raw_files
 
-        files.sort(key=lambda x: (x.get('kind') != 'drive#folder', x.get('name', '') or ''))
+        # --- Sorting Logic ---
+        # Get sort pref: 'name' (default), 'date', 'size'
+        sort_mode = account_mgr.get_user_pref(user_id, 'sort', 'name')
+        
+        # Helper for safe parsing
+        def get_date(f):
+            t = f.get('created_time') or f.get('modified_time')
+            if not t: return 0
+            try: return datetime.datetime.fromisoformat(t.replace('Z', '+00:00')).timestamp()
+            except: return 0
+            
+        def get_size(f):
+            try: return int(f.get('size', 0))
+            except: return 0
 
+        # Always put folders first
+        folders = [f for f in files if f.get('kind') == 'drive#folder']
+        non_folders = [f for f in files if f.get('kind') != 'drive#folder']
+
+        reverse_sort = True # Default descending for date/size
+        
+        if sort_mode == 'date':
+            folders.sort(key=get_date, reverse=True)
+            non_folders.sort(key=get_date, reverse=True)
+            sort_icon = "🕒 时间"
+        elif sort_mode == 'size':
+            folders.sort(key=get_size, reverse=True)
+            non_folders.sort(key=get_size, reverse=True)
+            sort_icon = "📊 大小"
+        else: # Name
+            folders.sort(key=lambda x: x.get('name', '').lower())
+            non_folders.sort(key=lambda x: x.get('name', '').lower())
+            sort_icon = "🔤 名称"
+
+        files = folders + non_folders
+
+        # Pagination
         items_per_page = 10
         total_items = len(files)
         max_page = max(0, (total_items - 1) // items_per_page)
@@ -85,20 +121,33 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         end_idx = start_idx + items_per_page
         current_files = files[start_idx:end_idx]
 
+        # Build Keyboard
         keyboard = []
         
+        # Top Nav
         nav_top = []
+        refresh_pid = "SEARCH" if active_search else (parent_id if parent_id else "")
         if active_search or parent_id:
              nav_top.append(InlineKeyboardButton("🏠 首页", callback_data="ls:"))
         
-        refresh_pid = "SEARCH" if active_search else (parent_id if parent_id else "")
         nav_top.append(InlineKeyboardButton("🔄 刷新", callback_data=f"ls:{refresh_pid}"))
+        
+        # Sort Toggle Button (Cycles: Name -> Date -> Size -> Name)
+        next_sort_map = {'name': 'date', 'date': 'size', 'size': 'name'}
+        next_sort = next_sort_map.get(sort_mode, 'name')
+        nav_top.append(InlineKeyboardButton(f"⇅ {sort_icon}", callback_data=f"sort_toggle:{next_sort}"))
+        
         keyboard.append(nav_top)
 
+        # File List
         for f in current_files:
             name = f.get('name', 'Unknown')
             fid = f['id']
-            dname = name[:20] + ".." if len(name) > 20 else name
+            # Truncate middle if too long
+            if len(name) > 25:
+                dname = name[:12] + ".." + name[-10:]
+            else:
+                dname = name
             
             if f.get('kind') == 'drive#folder':
                 keyboard.append([
@@ -109,6 +158,7 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
                 sz = format_bytes(f.get('size', 0))
                 keyboard.append([InlineKeyboardButton(f"📄 {dname} ({sz})", callback_data=f"file:{fid}")])
 
+        # Pagination Nav
         nav_row = []
         page_pid = "SEARCH" if active_search else (parent_id if parent_id else "")
         
@@ -122,6 +172,7 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         
         keyboard.append(nav_row)
 
+        # Tools Row
         if not active_search:
             tool_pid = parent_id if parent_id else ""
             keyboard.append([
@@ -130,6 +181,7 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
                 InlineKeyboardButton("🛠 批量", callback_data=f"tool_regex:{tool_pid}")
             ])
 
+        # Paste Context
         if 'clipboard' in context.user_data:
             op = "移动" if context.user_data['clipboard']['op'] == 'move' else "复制"
             paste_pid = parent_id if parent_id else ""
@@ -138,14 +190,17 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
                 InlineKeyboardButton("❌ 取消", callback_data="paste_cancel")
             ])
 
+        # Header Info
         username = account_mgr.active_user_map.get(str(user_id), "Unknown")
-        
+        if not username and account_mgr.get_user_pref(user_id, 'active_user'):
+             username = account_mgr.get_user_pref(user_id, 'active_user')
+
         if active_search:
             path_str = f"🔍 搜索: `{active_search}`"
         else:
             path_str = f"📂 路径: `{parent_id if parent_id else '根目录'}`"
             
-        text = f"👤 **{username}**\n{path_str}\n📦 项目数: {total_items}"
+        text = f"👤 **{username}**\n{path_str}\n📦 文件数: {total_items} | 排序: {sort_icon}"
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -153,11 +208,8 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
             try: 
                 await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
             except BadRequest as e:
-                # Ignore "Message is not modified" errors (Anti-Flood)
-                if "not modified" in str(e):
-                    pass
-                else:
-                    await update.callback_query.answer("⚠️ 加载失败", show_alert=False)
+                if "not modified" in str(e): pass
+                else: await update.callback_query.answer("⚠️ 加载失败", show_alert=False)
             except Exception as e:
                 pass
         else:
@@ -184,14 +236,15 @@ async def show_file_options(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         
         data = await client.get_download_url(file_id)
         name = data.get('name', 'Unknown')
+        size = format_bytes(data.get('size', 0))
         
         play_link = f"{base_url}/play?id={file_id}&user={user_id}"
         
-        text = f"📄 **{name}**"
+        text = f"📄 **{name}**\n📏 大小: {size}"
         if "trycloudflare.com" in base_url:
-            text += f"\n🌐 隧道在线 (无视VPN)"
+            text += f"\n🌐 **隧道在线** (可直接播放)"
         else:
-            text += f"\n🏠 局域网模式"
+            text += f"\n🏠 **局域网模式** (仅内网可用)"
         
         keyboard = [
             [InlineKeyboardButton("🖥️ 在线播放 / 调用 APP", url=play_link)],
@@ -271,17 +324,10 @@ async def generate_playlist(update, context, folder_id, mode='m3u'):
         out = io.BytesIO()
         out.write("#EXTM3U\n".encode('utf-8'))
         
-        # Use tunnel URL for M3U as well
         base_url = get_base_url(WEB_PORT)
         
         for f in vids:
-             # We use the local player proxy link for M3U so it works externally via tunnel
-             # Original direct link expires, but local proxy refreshes it? 
-             # Actually, best to use the proxy link: http://domain/play?id=...
-             # But M3U players expect media. The /play endpoint returns HTML.
-             # We need a stream endpoint or use the direct link.
-             # Direct links from API have expiry. 
-             # For now, let's use direct link from API as per original code, but maybe consider proxying later.
+             # Using direct API links for M3U playlist
              d = await client.get_download_url(f['id'])
              if d.get('url'): out.write(f"#EXTINF:-1,{f['name']}\n{d['url']}\n".encode('utf-8'))
         
@@ -293,7 +339,11 @@ async def generate_playlist(update, context, folder_id, mode='m3u'):
 
 async def show_cross_copy_menu(update, context, file_id):
     users = account_mgr.get_accounts_list()
-    kb = [[InlineKeyboardButton(f"To {u}", callback_data=f"x_copy_do:{file_id}:{u}")] for u in users if u != account_mgr.active_user_map.get(str(update.effective_user.id))]
+    # current_active = account_mgr.active_user_map.get(str(update.effective_user.id))
+    # Better to get from pref
+    current_active = account_mgr.get_user_pref(update.effective_user.id, 'active_user')
+    
+    kb = [[InlineKeyboardButton(f"To {u}", callback_data=f"x_copy_do:{file_id}:{u}")] for u in users if u != current_active]
     kb.append([InlineKeyboardButton("Cancel", callback_data="close_menu")])
     await update.callback_query.edit_message_text("Select Target:", reply_markup=InlineKeyboardMarkup(kb))
 

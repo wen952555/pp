@@ -67,7 +67,9 @@ async def show_system_status(update, context):
     
     # Check Login
     user_id = update.effective_user.id
-    active_user = account_mgr.active_user_map.get(str(user_id), "未登录")
+    # active_user = account_mgr.active_user_map.get(str(user_id), "未登录") 
+    # Use prefs
+    active_user = account_mgr.get_user_pref(user_id, 'active_user', "未登录")
     
     info = (
         "🖥 **系统状态诊断**\n\n"
@@ -106,7 +108,9 @@ async def login_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_accounts_menu(update, context):
     try:
         accounts = account_mgr.get_accounts_list()
-        active = account_mgr.active_user_map.get(str(update.effective_user.id))
+        # active = account_mgr.active_user_map.get(str(update.effective_user.id))
+        active = account_mgr.get_user_pref(update.effective_user.id, 'active_user')
+        
         kb = []
         for u in accounts:
             icn = "🟢" if u == active else "⚪️"
@@ -193,6 +197,17 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # File System
         elif cmd == "ls": await show_file_list(update, context, parent_id=arg, edit_msg=True)
+        elif cmd == "sort_toggle":
+            # arg is sort mode
+            account_mgr.set_user_pref(user_id, 'sort', arg)
+            # Find current page parent ID from context? No context. 
+            # We just refresh without parent ID if unknown, or default to root.
+            # Best is to try refreshing current view, but we lost parent_id in this call.
+            # Workaround: Assume root or search. For now just refresh root or last visited if we could track it.
+            # Actually, ls defaults to root/None if arg is missing.
+            await show_file_list(update, context, edit_msg=True)
+            await query.answer(f"已切换排序")
+
         elif cmd == "file": await show_file_options(update, context, arg)
         elif cmd == "page":
             try:

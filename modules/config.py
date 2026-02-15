@@ -18,6 +18,7 @@ ADMIN_ID = os.getenv("ADMIN_ID")
 DOWNLOAD_PATH = "downloads"
 WHITELIST_FILE = "whitelist.txt"
 ACCOUNTS_FILE = "accounts.json"
+USER_PREFS_FILE = "user_prefs.json"
 WEB_PORT = 8080
 
 # Proxy Support

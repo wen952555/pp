@@ -1,7 +1,7 @@
 
 import os
 import json
-from .config import ACCOUNTS_FILE, logger
+from .config import ACCOUNTS_FILE, USER_PREFS_FILE, logger
 
 PIKPAK_AVAILABLE = True
 try:
@@ -14,8 +14,9 @@ class AccountManager:
     def __init__(self):
         self.accounts = {}  # {username: password}
         self.clients = {}   # {username: PikPakApi}
-        self.active_user_map = {} # {tg_user_id: username}
+        self.user_prefs = {} # {tg_user_id: {'active_user': '...', 'sort': 'name'}}
         self.load_accounts()
+        self.load_prefs()
         
         # Load from Env
         env_user = os.getenv("PIKPAK_USER")
@@ -38,6 +39,32 @@ class AccountManager:
         except Exception as e:
             logger.error(f"Failed to save accounts: {e}")
 
+    def load_prefs(self):
+        if os.path.exists(USER_PREFS_FILE):
+            try:
+                with open(USER_PREFS_FILE, 'r') as f:
+                    self.user_prefs = json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load prefs: {e}")
+
+    def save_prefs(self):
+        try:
+            with open(USER_PREFS_FILE, 'w') as f:
+                json.dump(self.user_prefs, f)
+        except Exception as e:
+            logger.error(f"Failed to save prefs: {e}")
+
+    def get_user_pref(self, tg_user_id, key, default=None):
+        uid = str(tg_user_id)
+        if uid not in self.user_prefs: return default
+        return self.user_prefs[uid].get(key, default)
+
+    def set_user_pref(self, tg_user_id, key, value):
+        uid = str(tg_user_id)
+        if uid not in self.user_prefs: self.user_prefs[uid] = {}
+        self.user_prefs[uid][key] = value
+        self.save_prefs()
+
     def add_account_credentials(self, u, p):
         self.accounts[u] = p
         self.save_accounts()
@@ -47,11 +74,13 @@ class AccountManager:
             del self.accounts[u]
             if u in self.clients:
                 del self.clients[u]
-            # Reset active user map
-            for uid, user in list(self.active_user_map.items()):
-                if user == u:
-                    del self.active_user_map[uid]
+            
+            # Remove from prefs
+            for uid, prefs in self.user_prefs.items():
+                if prefs.get('active_user') == u:
+                    del self.user_prefs[uid]['active_user']
             self.save_accounts()
+            self.save_prefs()
             return True
         return False
 
@@ -69,12 +98,14 @@ class AccountManager:
         
         username = specific_username
         if not username:
-            # Determine active username
-            username = self.active_user_map.get(str(tg_user_id))
-            if not username:
+            # Determine active username from prefs
+            username = self.get_user_pref(tg_user_id, 'active_user')
+            
+            # Default to first account if not set or invalid
+            if not username or username not in self.accounts:
                 if self.accounts:
                     username = list(self.accounts.keys())[0]
-                    self.active_user_map[str(tg_user_id)] = username
+                    self.set_user_pref(tg_user_id, 'active_user', username)
                 else:
                     return None
         
@@ -98,7 +129,7 @@ class AccountManager:
 
     async def switch_account(self, tg_user_id, target_username):
         if target_username in self.accounts:
-            self.active_user_map[str(tg_user_id)] = target_username
+            self.set_user_pref(tg_user_id, 'active_user', target_username)
             # Warm up connection with force refresh to ensure it works
             client = await self.get_client(tg_user_id, force_refresh=True)
             return client is not None

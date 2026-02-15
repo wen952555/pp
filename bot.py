@@ -5,6 +5,11 @@ import logging
 import io
 import traceback
 import os
+import nest_asyncio
+
+# Apply nest_asyncio to solve event loop issues in Termux
+nest_asyncio.apply()
+
 from telegram import Update
 from telegram.request import HTTPXRequest
 from telegram.ext import (
