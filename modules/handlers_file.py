@@ -1,28 +1,29 @@
 
 import urllib.parse
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import os
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
 from telegram.ext import ContextTypes
 from .accounts import alist_mgr
 from .config import global_cache, WEB_PORT
 from .utils import format_bytes, get_base_url
 from .handlers_task import start_stream_process
 
+# --- File Browser ---
 async def show_alist_files(update: Update, context: ContextTypes.DEFAULT_TYPE, path="/", page=1, edit_msg=False):
-    # AList API List
     if path == "": path = "/"
     
-    # Cache key
-    cache_key = f"alist_list_{path}_{page}"
-    cached = global_cache.get(cache_key)
+    # Cache key (disabled for now to ensure freshness during operations)
+    # cache_key = f"alist_list_{path}_{page}"
+    # cached = global_cache.get(cache_key)
     
     data = None
-    if cached:
-        data = cached
-    else:
+    # if cached: data = cached
+    
+    if not data:
         resp = alist_mgr.list_files(path, page=page)
         if resp and resp.get('code') == 200:
             data = resp['data']
-            global_cache.set(cache_key, data, ttl=60) # Cache 1 min
+            # global_cache.set(cache_key, data, ttl=30)
     
     if not data:
         msg = "❌ 无法连接 AList 或 Token 过期"
@@ -36,39 +37,53 @@ async def show_alist_files(update: Update, context: ContextTypes.DEFAULT_TYPE, p
     # Sorting: Folders first
     content.sort(key=lambda x: (not x['is_dir'], x['name']))
     
-    # Build Keyboard
     keyboard = []
     
-    # Parent Dir
+    # 1. Navigation Row
+    nav_row = []
     if path != "/":
         parent = "/" + "/".join(path.strip("/").split("/")[:-1])
-        keyboard.append([InlineKeyboardButton("🔙 返回上一级", callback_data=f"ls:{parent}")])
+        if parent == "": parent = "/"
+        nav_row.append(InlineKeyboardButton("🔙 上一级", callback_data=f"ls:{parent}"))
+    
+    nav_row.append(InlineKeyboardButton("🔄 刷新", callback_data=f"ls_force:{path}"))
+    nav_row.append(InlineKeyboardButton("🏠 首页", callback_data="ls:/"))
+    keyboard.append(nav_row)
 
-    # Items
+    # 2. Clipboard Paste Action
+    clipboard = context.user_data.get('clipboard')
+    if clipboard and clipboard.get('files'):
+        op = "✂️ 移动" if clipboard['op'] == 'move' else "📑 复制"
+        count = len(clipboard['files'])
+        keyboard.append([
+            InlineKeyboardButton(f"{op} {count} 个文件到此", callback_data=f"act_paste:{path}"),
+            InlineKeyboardButton("❌ 取消粘贴", callback_data="act_clear_clip")
+        ])
+
+    # 3. File List
     for item in content:
         name = item['name']
         is_dir = item['is_dir']
-        full_path = f"{path}/{name}".replace("//", "/")
+        # Construct full path carefully
+        full_path = os.path.join(path, name).replace("\\", "/")
         
-        # Safe callback data (path can be long)
-        # We assume paths fit in 64 bytes usually, or we need a map. 
-        # For simple use, we send path directly. 
-        # If path too long, AList IDs are not stable, so we rely on path.
+        # Truncate for display
+        display_name = (name[:20] + '..') if len(name) > 20 else name
         
-        if len(full_path.encode('utf-8')) > 50:
-             # Very basic truncation for UI, but might break logic if deep
-             pass 
-
         if is_dir:
-            keyboard.append([InlineKeyboardButton(f"📁 {name}", callback_data=f"ls:{full_path}")])
+            keyboard.append([
+                InlineKeyboardButton(f"📁 {display_name}", callback_data=f"ls:{full_path}"),
+                InlineKeyboardButton("⚙️", callback_data=f"opt_dir:{full_path}")
+            ])
         else:
             size = format_bytes(item['size'])
-            keyboard.append([InlineKeyboardButton(f"📄 {name} ({size})", callback_data=f"file:{full_path}")])
+            keyboard.append([InlineKeyboardButton(f"📄 {display_name} ({size})", callback_data=f"file:{full_path}")])
 
-    # Controls
-    nav = []
-    nav.append(InlineKeyboardButton("🔄 刷新", callback_data=f"ls_force:{path}"))
-    keyboard.append(nav)
+    # 4. Folder Actions
+    keyboard.append([
+        InlineKeyboardButton("➕ 新建文件夹", callback_data=f"act_mkdir:{path}"),
+        # InlineKeyboardButton("📥 离线下载", callback_data=f"act_offline:{path}")
+    ])
 
     text = f"📂 **文件列表**\n路径: `{path}`\n总数: {total}"
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -79,8 +94,9 @@ async def show_alist_files(update: Update, context: ContextTypes.DEFAULT_TYPE, p
     else:
         await context.bot.send_message(update.effective_chat.id, text, reply_markup=reply_markup, parse_mode='Markdown')
 
+# --- File Details & Actions ---
 async def show_alist_file_action(update, context, path):
-    if update.callback_query: await update.callback_query.answer("获取中...")
+    if update.callback_query: await update.callback_query.answer("加载菜单...")
     
     resp = alist_mgr.get_file_info(path)
     if not resp or resp.get('code') != 200:
@@ -90,50 +106,155 @@ async def show_alist_file_action(update, context, path):
     data = resp['data']
     name = data['name']
     raw_url = data['raw_url']
-    sign = data.get('sign', '')
+    if data.get('sign'): raw_url += f"?sign={data['sign']}"
     
-    # Construct full URL
-    # If raw_url is relative or needs signing
-    full_url = raw_url
-    if sign and 'sign=' not in full_url:
-        full_url += f"?sign={sign}" if '?' not in full_url else f"&sign={sign}"
-
-    # Web Player Link
-    # Encode URL
-    encoded_url = urllib.parse.quote(full_url)
-    encoded_name = urllib.parse.quote(name)
+    # Links
     base_url = get_base_url(WEB_PORT)
-    # We can use the generic player endpoint if we adapted it, 
-    # but here we can just use the AList raw link for external players
-    
+    encoded_path = urllib.parse.quote(path)
+    web_play_link = f"{base_url}/play?id={encoded_path}"
+    encoded_name = urllib.parse.quote(name)
+
     text = f"📄 **{name}**\n📏 大小: {format_bytes(data['size'])}"
     
-    keyboard = [
-        [InlineKeyboardButton("📺 推流到 Telegram 直播", callback_data=f"do_stream:{path}")],
-        [InlineKeyboardButton("▶️ 调用本地播放器", url=f"intent:{full_url}#Intent;type=video/*;S.title={encoded_name};end")],
-        [InlineKeyboardButton("🔗 复制直链", callback_data="copy_link")], # Handle in callback
-        [InlineKeyboardButton("🔙 返回", callback_data=f"ls:{'/' + '/'.join(path.strip('/').split('/')[:-1])}")]
+    # Store for actions
+    context.user_data['target_path'] = path
+    context.user_data['target_name'] = name
+    context.user_data['temp_file_url'] = raw_url
+
+    kb = [
+        [InlineKeyboardButton("📺 推流直播", callback_data=f"do_stream:{path}"), InlineKeyboardButton("🖥️ 网页播放", url=web_play_link)],
+        [InlineKeyboardButton("▶️ 本地播放", url=f"intent:{raw_url}#Intent;type=video/*;S.title={encoded_name};end"), InlineKeyboardButton("🔗 复制链接", callback_data="copy_link")],
+        [InlineKeyboardButton("✏️ 重命名", callback_data="req_rename"), InlineKeyboardButton("🗑 删除", callback_data="req_delete")],
+        [InlineKeyboardButton("✂️ 剪切", callback_data="req_cut"), InlineKeyboardButton("📑 复制", callback_data="req_copy")],
+        [InlineKeyboardButton("🔙 返回列表", callback_data=f"ls:{os.path.dirname(path)}")]
     ]
     
-    # Store URL in context for copy/stream
-    context.user_data['temp_file_url'] = full_url
-    context.user_data['temp_file_name'] = name
-    
-    await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
-async def handle_alist_action(update, context, action, payload):
-    if action == "do_stream":
-        # Get url from context if matched or fetch again
-        path = payload
-        resp = alist_mgr.get_file_info(path)
-        if resp and resp.get('code') == 200:
-            data = resp['data']
-            full_url = data['raw_url']
-            if data.get('sign'): full_url += f"?sign={data['sign']}"
-            await start_stream_process(update, context, full_url, data['name'])
+async def show_dir_options(update, context, path):
+    context.user_data['target_path'] = path
+    context.user_data['target_name'] = os.path.basename(path)
+    
+    text = f"📁 **文件夹管理**\n路径: `{path}`"
+    kb = [
+        [InlineKeyboardButton("✏️ 重命名", callback_data="req_rename"), InlineKeyboardButton("🗑 删除", callback_data="req_delete")],
+        [InlineKeyboardButton("✂️ 剪切", callback_data="req_cut"), InlineKeyboardButton("📑 复制", callback_data="req_copy")],
+        [InlineKeyboardButton("🔙 返回", callback_data=f"ls:{os.path.dirname(path)}")]
+    ]
+    await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+# --- Action Logic ---
+
+async def handle_fs_action_request(update, context, action):
+    query = update.callback_query
+    path = context.user_data.get('target_path')
+    name = context.user_data.get('target_name')
+    parent = os.path.dirname(path)
+    
+    if action == "req_rename":
+        context.user_data['input_mode'] = 'rename'
+        await query.message.reply_text(
+            f"✏️ 请输入 `{name}` 的新名称:", 
+            reply_markup=ForceReply(selective=True), 
+            parse_mode='Markdown'
+        )
+        
+    elif action == "req_delete":
+        kb = [
+            [InlineKeyboardButton("🗑 确认删除", callback_data="confirm_delete")],
+            [InlineKeyboardButton("❌ 取消", callback_data="cancel_action")]
+        ]
+        await query.edit_message_text(f"⚠️ **确认删除** `{name}` ?", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    elif action in ["req_cut", "req_copy"]:
+        op = 'move' if action == "req_cut" else 'copy'
+        context.user_data['clipboard'] = {
+            'op': op,
+            'source_dir': parent,
+            'files': [name] # Currently single file
+        }
+        await query.answer(f"✅ 已{'剪切' if op=='move' else '复制'}，请前往目标文件夹粘贴")
+        await show_alist_files(update, context, path=parent, edit_msg=True)
+
+    elif action == "act_mkdir":
+        # path passed in payload is the current directory
+        current_dir = path # Actually payload from callback
+        context.user_data['input_mode'] = 'mkdir'
+        context.user_data['target_path'] = current_dir
+        await query.message.reply_text(
+            "➕ 请输入新文件夹名称:", 
+            reply_markup=ForceReply(selective=True)
+        )
+
+    elif action == "act_paste":
+        current_dir = path # Passed from callback
+        clipboard = context.user_data.get('clipboard')
+        if not clipboard: return
+        
+        await query.edit_message_text("⏳ 处理中...")
+        res = alist_mgr.fs_move_copy(
+            src_dir=clipboard['source_dir'],
+            dst_dir=current_dir,
+            names=clipboard['files'],
+            action=clipboard['op']
+        )
+        
+        if res.get('code') == 200:
+            del context.user_data['clipboard']
+            await query.answer("✅ 操作成功")
+            await show_alist_files(update, context, path=current_dir, edit_msg=True)
         else:
-            await update.callback_query.answer("无法获取链接")
+            await query.message.reply_text(f"❌ 失败: {res.get('message')}")
+            await show_alist_files(update, context, path=current_dir, edit_msg=True)
+
+    elif action == "confirm_delete":
+        res = alist_mgr.fs_remove(names=[name], dir_path=parent)
+        if res.get('code') == 200:
+            await query.answer("✅ 已删除")
+            await show_alist_files(update, context, path=parent, edit_msg=True)
+        else:
+            await query.edit_message_text(f"❌ 删除失败: {res.get('message')}")
             
-    elif action == "copy_link":
-        url = context.user_data.get('temp_file_url', 'Error')
-        await context.bot.send_message(update.effective_chat.id, f"🔗 `{url}`", parse_mode='Markdown')
+    elif action == "cancel_action":
+        # Determine if it was file or folder to return to
+        await show_alist_files(update, context, path=parent, edit_msg=True)
+
+    elif action == "act_clear_clip":
+        if 'clipboard' in context.user_data: del context.user_data['clipboard']
+        # Refresh current list
+        # We need the current path, but callback doesn't carry it easily on clear
+        # So we just answer
+        await query.answer("已清空剪贴板")
+
+# --- Input Processor ---
+async def process_fs_input(update, context):
+    mode = context.user_data.get('input_mode')
+    text = update.message.text.strip()
+    
+    if mode == 'rename':
+        old_path = context.user_data.get('target_path')
+        res = alist_mgr.fs_rename(old_path, text)
+        if res.get('code') == 200:
+            await update.message.reply_text(f"✅ 重命名成功: `{text}`", parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"❌ 重命名失败: {res.get('message')}")
+            
+    elif mode == 'mkdir':
+        parent = context.user_data.get('target_path')
+        full_path = os.path.join(parent, text).replace("\\", "/")
+        res = alist_mgr.fs_mkdir(full_path)
+        if res.get('code') == 200:
+            await update.message.reply_text(f"✅ 文件夹已创建: `{text}`", parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"❌ 创建失败: {res.get('message')}")
+            
+    elif mode == 'offline_dl':
+        path = context.user_data.get('target_path', '/')
+        res = alist_mgr.add_offline_download(text, path)
+        if res.get('code') == 200:
+             await update.message.reply_text(f"✅ 离线任务已添加", parse_mode='Markdown')
+        else:
+             await update.message.reply_text(f"❌ 添加失败: {res.get('message')}")
+
+    # Clear state
+    if 'input_mode' in context.user_data: del context.user_data['input_mode']

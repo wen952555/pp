@@ -1,28 +1,36 @@
 
 from aiohttp import web
 from .config import WEB_PORT, logger
-from .accounts import account_mgr
+from .accounts import alist_mgr
 from .utils import get_local_ip, get_base_url
 import urllib.parse
 
 async def handle_player(request):
-    file_id = request.query.get('id')
-    user_id = request.query.get('user')
+    # In AList context, 'id' is the file path
+    file_path = request.query.get('id')
     
-    if not file_id or not user_id:
-        return web.Response(text="Missing parameters", status=400)
+    if not file_path:
+        return web.Response(text="Missing parameters (id/path)", status=400)
 
-    client = await account_mgr.get_client(user_id)
-    if not client:
-        return web.Response(text="Bot not logged in. Please restart bot or login.", status=500)
+    # Use alist_mgr to get link
+    # Note: alist_mgr calls are synchronous requests, might block briefly but acceptable for this use case
+    resp = alist_mgr.get_file_info(file_path)
+    
+    if not resp or resp.get('code') != 200:
+        return web.Response(text="Could not get link from AList (File not found or Token expired).", status=404)
 
     try:
-        data = await client.get_download_url(file_id)
-        video_url = data.get('url')
+        data = resp['data']
+        video_url = data.get('raw_url')
         filename = data.get('name', 'Video')
+        sign = data.get('sign')
         
         if not video_url:
-            return web.Response(text="Could not get link (File might be processing or token expired).", status=404)
+            return web.Response(text="No raw_url found.", status=404)
+
+        # Handle AList Sign
+        if sign and 'sign=' not in video_url:
+             video_url += f"?sign={sign}" if '?' not in video_url else f"&sign={sign}"
 
         # URL Encode for intent links
         encoded_url = urllib.parse.quote(video_url)
@@ -54,9 +62,6 @@ async def handle_player(request):
                 
                 .toast {{ position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(255,255,255,0.9); color: #000; padding: 10px 20px; border-radius: 20px; font-size: 14px; opacity: 0; transition: 0.3s; pointer-events: none; }}
                 .toast.show {{ opacity: 1; bottom: 30px; }}
-
-                /* Icons */
-                .icon {{ width: 18px; height: 18px; fill: currentColor; }}
             </style>
         </head>
         <body>
@@ -82,14 +87,12 @@ async def handle_player(request):
                     </button>
                 </div>
 
-                <div class="section-title">Open in Player</div>
+                <div class="section-title">External Players</div>
                 <div class="btn-grid">
                     <a href="vlc://{video_url}" class="btn">🧡 VLC</a>
                     <a href="nplayer-{video_url}" class="btn">▶️ nPlayer</a>
                     <a href="intent:{video_url}#Intent;package=com.mxtech.videoplayer.ad;S.title={encoded_name};end" class="btn">💙 MX Player</a>
                     <a href="potplayer://{video_url}" class="btn">💛 PotPlayer</a>
-                    <a href="iina://weblink?url={encoded_url}" class="btn">🌀 IINA</a>
-                    <a href="infuse://x-callback-url/play?url={encoded_url}" class="btn">🧡 Infuse</a>
                 </div>
             </div>
 
@@ -101,7 +104,6 @@ async def handle_player(request):
                     navigator.clipboard.writeText(url).then(() => {{
                         showToast();
                     }}).catch(err => {{
-                        // Fallback
                         const input = document.createElement('textarea');
                         input.value = url;
                         document.body.appendChild(input);
@@ -133,6 +135,5 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', WEB_PORT)
     await site.start()
     
-    # Try to identify URL immediately for logs
     base_url = get_base_url(WEB_PORT)
-    logger.info(f"Web Player Server started. Access at: {base_url}/play?id=... (Check cf_tunnel.log for public URL if different)")
+    logger.info(f"Web Player Server started. Access at: {base_url}/play?id=/path/to/file")
