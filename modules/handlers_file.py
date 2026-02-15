@@ -8,7 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceRe
 from telegram.ext import ContextTypes
 from .accounts import account_mgr
 from .config import WEB_PORT, DOWNLOAD_PATH
-from .utils import get_local_ip, format_bytes
+from .utils import get_local_ip, get_base_url, format_bytes
 
 # --- FILE LISTING ---
 async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, parent_id=None, page=0, edit_msg=False, search_query=None):
@@ -168,13 +168,18 @@ async def show_file_options(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         data = await client.get_download_url(file_id)
         name = data.get('name', 'Unknown')
         
-        ip = get_local_ip()
-        play_link = f"http://{ip}:{WEB_PORT}/play?id={file_id}&user={user_id}"
+        # USE TUNNEL URL IF AVAILABLE
+        base_url = get_base_url(WEB_PORT)
+        play_link = f"{base_url}/play?id={file_id}&user={user_id}"
         
         text = f"📄 **{name}**"
+        if "trycloudflare.com" in base_url:
+            text += f"\n🌐 隧道在线 (无视VPN)"
+        else:
+            text += f"\n🏠 局域网模式"
         
         keyboard = [
-            [InlineKeyboardButton("🖥️ 在线播放", url=play_link)],
+            [InlineKeyboardButton("🖥️ 在线播放 / 调用 APP", url=play_link)],
             [InlineKeyboardButton("🔗 直链", callback_data=f"act_link:{file_id}"), InlineKeyboardButton("✏️ 重命名", callback_data=f"act_ren:{file_id}")],
             [InlineKeyboardButton("✂️ 剪切", callback_data=f"act_cut:{file_id}"), InlineKeyboardButton("🗑 删除", callback_data=f"act_del:{file_id}")]
         ]
@@ -250,9 +255,21 @@ async def generate_playlist(update, context, folder_id, mode='m3u'):
         vids = [f for f in resp.get('files', []) if f.get('name','').endswith(('.mp4','.mkv'))]
         out = io.BytesIO()
         out.write("#EXTM3U\n".encode('utf-8'))
+        
+        # Use tunnel URL for M3U as well
+        base_url = get_base_url(WEB_PORT)
+        
         for f in vids:
+             # We use the local player proxy link for M3U so it works externally via tunnel
+             # Original direct link expires, but local proxy refreshes it? 
+             # Actually, best to use the proxy link: http://domain/play?id=...
+             # But M3U players expect media. The /play endpoint returns HTML.
+             # We need a stream endpoint or use the direct link.
+             # Direct links from API have expiry. 
+             # For now, let's use direct link from API as per original code, but maybe consider proxying later.
              d = await client.get_download_url(f['id'])
              if d.get('url'): out.write(f"#EXTINF:-1,{f['name']}\n{d['url']}\n".encode('utf-8'))
+        
         out.seek(0)
         await context.bot.send_document(update.effective_chat.id, out, filename="list.m3u")
         await context.bot.delete_message(update.effective_chat.id, msg.message_id)

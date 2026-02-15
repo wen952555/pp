@@ -2,7 +2,7 @@
 from aiohttp import web
 from .config import WEB_PORT, logger
 from .accounts import account_mgr
-from .utils import get_local_ip
+from .utils import get_local_ip, get_base_url
 
 async def handle_player(request):
     file_id = request.query.get('id')
@@ -61,4 +61,7 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', WEB_PORT)
     await site.start()
-    logger.info(f"Web Player Server started on http://{get_local_ip()}:{WEB_PORT}")
+    
+    # Try to identify URL immediately for logs
+    base_url = get_base_url(WEB_PORT)
+    logger.info(f"Web Player Server started. Access at: {base_url}/play?id=... (Check cf_tunnel.log for public URL if different)")

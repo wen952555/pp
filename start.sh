@@ -13,16 +13,27 @@ if ! command -v pm2 >/dev/null 2>&1; then npm install pm2 -g; fi
 pm2 stop all >/dev/null 2>&1
 pm2 delete all >/dev/null 2>&1
 
-# 1. Start AList
+# 1. Start Cloudflared Tunnel (if installed)
+if [ -f "./cloudflared" ]; then
+    echo -e "${GREEN}启动 Cloudflare Tunnel...${NC}"
+    # Reset log file
+    echo "" > cf_tunnel.log
+    # Run cloudflared, exposing port 8080 (Bot Web Server)
+    # We use 'script' to trick cloudflared line buffering if needed, or just standard redirection
+    pm2 start "./cloudflared tunnel --url http://localhost:8080 --logfile ./cf_tunnel.log" --name "cf-tunnel"
+else
+    echo -e "${YELLOW}⚠️ 未找到 Cloudflared，将只使用局域网IP${NC}"
+fi
+
+# 2. Start AList
 if [ -f "./alist" ]; then
     echo -e "${GREEN}启动 AList Server...${NC}"
-    # Start alist with 'server' command
     pm2 start ./alist --name "alist" -- server
 else
     echo -e "${YELLOW}⚠️ 未找到 AList 可执行文件${NC}"
 fi
 
-# 2. Start Bot
+# 3. Start Bot
 echo -e "${GREEN}启动 Telegram Bot...${NC}"
 pm2 start bot.py --name "pikpak-bot" --interpreter python --log ./bot.log
 
@@ -40,5 +51,5 @@ echo -e "\n${GREEN}====================================${NC}"
 echo -e "   🚀 所有服务已启动"
 echo -e "${GREEN}====================================${NC}"
 echo -e "🤖 Bot 状态: ${CYAN}pm2 log pikpak-bot${NC}"
-echo -e "🗂️ AList 后台: ${CYAN}http://127.0.0.1:5244${NC}"
-echo -e "🔑 AList 默认密码: ${CYAN}123456${NC} (若 setup.sh 设置成功)"
+echo -e "🌐 隧道日志: ${CYAN}tail -f cf_tunnel.log${NC}"
+echo -e "🗂️ AList: ${CYAN}http://127.0.0.1:5244${NC}"

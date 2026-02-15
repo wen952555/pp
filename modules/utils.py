@@ -1,6 +1,7 @@
 
 import socket
 import re
+import os
 
 # Try importing yt_dlp
 try:
@@ -20,6 +21,30 @@ def get_local_ip():
         return ip
     except:
         return "127.0.0.1"
+
+def get_base_url(port):
+    """
+    Tries to find the Cloudflare Tunnel URL first.
+    If not found, falls back to Local IP.
+    """
+    log_file = "cf_tunnel.log"
+    
+    # Try to find valid trycloudflare.com URL in logs
+    if os.path.exists(log_file):
+        try:
+            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+                # Find all matches, pick the last one usually, or just any valid one
+                # Pattern for lines like: https://fragrant-smoke-8899.trycloudflare.com
+                matches = re.findall(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', content)
+                if matches:
+                    # Return the most recent one found
+                    return matches[-1]
+        except Exception:
+            pass
+            
+    # Fallback to local IP
+    return f"http://{get_local_ip()}:{port}"
 
 def format_bytes(size):
     if not size: return "0 B"
