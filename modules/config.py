@@ -14,8 +14,6 @@ else: load_dotenv()
 # Constants
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
-DOWNLOAD_PATH = "downloads"
-WHITELIST_FILE = "whitelist.txt"
 WEB_PORT = 8080
 
 # AList Config
@@ -58,24 +56,15 @@ class SimpleCache:
 global_cache = SimpleCache()
 
 # Auth Helper
-def get_whitelist():
-    ids = []
-    if ADMIN_ID:
-        ids.append(str(ADMIN_ID).strip())
-    
-    if os.path.exists(WHITELIST_FILE):
-        with open(WHITELIST_FILE, 'r') as f:
-            for line in f:
-                if line.strip(): ids.append(line.strip())
-    return ids
-
 async def check_auth(update, context) -> bool:
     if not update.effective_user: return False
     user_id = str(update.effective_user.id)
-    allowed_ids = get_whitelist()
-    if not allowed_ids:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="⛔ **配置错误**: 管理员 ID 未设置。")
+    # Simple Admin Check
+    if not ADMIN_ID:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="⛔ **配置错误**: 管理员 ID (ADMIN_ID) 未设置。")
         return False
-    if user_id not in allowed_ids:
+    
+    if user_id != str(ADMIN_ID).strip():
+        # Optional: Silent fail for unauthorized users or generic message
         return False
     return True

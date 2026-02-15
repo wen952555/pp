@@ -58,11 +58,11 @@ async def show_storage_list(update, context):
 
 async def start_offline_download(update, context):
     context.user_data['input_mode'] = 'offline_dl'
-    # Default to root or last visited? Let's default to root for simplicity
+    # Default to root for main menu action
     context.user_data['target_path'] = "/" 
     await context.bot.send_message(
         update.effective_chat.id, 
-        "📥 **离线下载**\n请回复下载链接 (HTTP/Magnet):",
+        "📥 **离线下载 (保存到 / )**\n请回复下载链接 (HTTP/Magnet):",
         reply_markup=ForceReply(selective=True)
     )
 
@@ -120,17 +120,17 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         path = data[8:]
         await show_dir_options(update, context, path)
         
-    # Actions (Rename, Delete, Copy, Paste, etc)
+    # FS Actions (Rename, Delete, Copy, Paste, Mkdir, OfflineDL)
     elif data.startswith("req_") or data.startswith("act_") or data == "confirm_delete" or data == "cancel_action":
         payload = None
         action = data
         if ":" in data:
             action, payload = data.split(":", 1)
-            # act_mkdir and act_paste pass payload as path
-            if action == "act_mkdir" or action == "act_paste":
-                 await handle_fs_action_request(update, context, action) # Payload logic inside
-                 return
-        
+            # actions with payload: act_mkdir, act_paste, act_offline_dl
+            if action in ["act_mkdir", "act_paste", "act_offline_dl"]:
+                 # Manually inject payload into user_data['target_path'] for the handler
+                 context.user_data['target_path'] = payload
+                 
         await handle_fs_action_request(update, context, action)
 
     # Legacy AList Actions

@@ -12,18 +12,11 @@ from .handlers_task import start_stream_process
 async def show_alist_files(update: Update, context: ContextTypes.DEFAULT_TYPE, path="/", page=1, edit_msg=False):
     if path == "": path = "/"
     
-    # Cache key (disabled for now to ensure freshness during operations)
-    # cache_key = f"alist_list_{path}_{page}"
-    # cached = global_cache.get(cache_key)
-    
     data = None
-    # if cached: data = cached
-    
-    if not data:
-        resp = alist_mgr.list_files(path, page=page)
-        if resp and resp.get('code') == 200:
-            data = resp['data']
-            # global_cache.set(cache_key, data, ttl=30)
+    # No cache for now to ensure freshness
+    resp = alist_mgr.list_files(path, page=page)
+    if resp and resp.get('code') == 200:
+        data = resp['data']
     
     if not data:
         msg = "❌ 无法连接 AList 或 Token 过期"
@@ -82,7 +75,7 @@ async def show_alist_files(update: Update, context: ContextTypes.DEFAULT_TYPE, p
     # 4. Folder Actions
     keyboard.append([
         InlineKeyboardButton("➕ 新建文件夹", callback_data=f"act_mkdir:{path}"),
-        # InlineKeyboardButton("📥 离线下载", callback_data=f"act_offline:{path}")
+        InlineKeyboardButton("📥 离线下载", callback_data=f"act_offline_dl:{path}")
     ])
 
     text = f"📂 **文件列表**\n路径: `{path}`\n总数: {total}"
@@ -178,7 +171,7 @@ async def handle_fs_action_request(update, context, action):
 
     elif action == "act_mkdir":
         # path passed in payload is the current directory
-        current_dir = path # Actually payload from callback
+        current_dir = path # Payload from callback
         context.user_data['input_mode'] = 'mkdir'
         context.user_data['target_path'] = current_dir
         await query.message.reply_text(
@@ -186,8 +179,17 @@ async def handle_fs_action_request(update, context, action):
             reply_markup=ForceReply(selective=True)
         )
 
+    elif action == "act_offline_dl":
+        current_dir = path # Payload from callback
+        context.user_data['input_mode'] = 'offline_dl'
+        context.user_data['target_path'] = current_dir
+        await query.message.reply_text(
+            "📥 请回复下载链接 (HTTP/Magnet):",
+            reply_markup=ForceReply(selective=True)
+        )
+
     elif action == "act_paste":
-        current_dir = path # Passed from callback
+        current_dir = path # Payload from callback
         clipboard = context.user_data.get('clipboard')
         if not clipboard: return
         
@@ -216,15 +218,31 @@ async def handle_fs_action_request(update, context, action):
             await query.edit_message_text(f"❌ 删除失败: {res.get('message')}")
             
     elif action == "cancel_action":
-        # Determine if it was file or folder to return to
         await show_alist_files(update, context, path=parent, edit_msg=True)
 
     elif action == "act_clear_clip":
         if 'clipboard' in context.user_data: del context.user_data['clipboard']
-        # Refresh current list
-        # We need the current path, but callback doesn't carry it easily on clear
-        # So we just answer
         await query.answer("已清空剪贴板")
+
+# --- Specific AList Actions ---
+async def handle_alist_action(update, context, action, payload):
+    if action == "do_stream":
+        path = payload
+        resp = alist_mgr.get_file_info(path)
+        if resp and resp.get('code') == 200:
+            data = resp['data']
+            full_url = data['raw_url']
+            if data.get('sign'): full_url += f"?sign={data['sign']}"
+            await start_stream_process(update, context, full_url, data['name'])
+        else:
+            if update.callback_query:
+                await update.callback_query.answer("无法获取链接")
+            
+    elif action == "copy_link":
+        url = context.user_data.get('temp_file_url', 'Error')
+        await context.bot.send_message(update.effective_chat.id, f"🔗 `{url}`", parse_mode='Markdown')
+        if update.callback_query:
+            await update.callback_query.answer("已发送")
 
 # --- Input Processor ---
 async def process_fs_input(update, context):
@@ -252,7 +270,7 @@ async def process_fs_input(update, context):
         path = context.user_data.get('target_path', '/')
         res = alist_mgr.add_offline_download(text, path)
         if res.get('code') == 200:
-             await update.message.reply_text(f"✅ 离线任务已添加", parse_mode='Markdown')
+             await update.message.reply_text(f"✅ 离线任务已添加: `{text}`", parse_mode='Markdown')
         else:
              await update.message.reply_text(f"❌ 添加失败: {res.get('message')}")
 
