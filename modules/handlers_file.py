@@ -203,9 +203,8 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
             ])
 
         # Header Info
-        username = account_mgr.active_user_map.get(str(user_id), "Unknown")
-        if not username and account_mgr.get_user_pref(user_id, 'active_user'):
-             username = account_mgr.get_user_pref(user_id, 'active_user')
+        # Replaced deprecated attribute access with method
+        username = account_mgr.get_user_pref(user_id, 'active_user', "Unknown")
 
         if active_search:
             path_str = f"🔍 搜索: `{active_search}`"
