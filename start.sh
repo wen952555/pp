@@ -29,8 +29,9 @@ while true; do
     echo "[Wrapper] Starting cloudflared..."
     # 1. Use 127.0.0.1 instead of localhost to bypass local DNS resolver issues
     # 2. --protocol http2: Most stable for quick tunnels on Android
-    # 3. --no-autoupdate: Prevent permission errors
-    ./cloudflared tunnel --url http://127.0.0.1:8080 --protocol http2 --no-autoupdate --logfile ./cf_tunnel.log
+    # 3. --edge-ip-version 4: Force IPv4 for edge connection (Fixes Termux IPv6 DNS lookup fails)
+    # 4. --no-autoupdate: Prevent permission errors
+    ./cloudflared tunnel --url http://127.0.0.1:8080 --protocol http2 --edge-ip-version 4 --no-autoupdate --logfile ./cf_tunnel.log
     
     echo "[Wrapper] Cloudflared exited. Sleeping 10s before retry..."
     sleep 10
