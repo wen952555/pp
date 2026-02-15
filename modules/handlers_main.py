@@ -5,7 +5,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ForceReply
 from telegram.ext import ContextTypes
 from .config import check_auth, WEB_PORT, DOWNLOAD_PATH
-from .utils import get_base_url
+from .utils import get_base_url, is_rate_limited
 from .accounts import account_mgr
 from .handlers_file import (
     show_file_list, show_file_options, generate_playlist, 
@@ -39,16 +39,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Get Status
     base_url = get_base_url(WEB_PORT)
-    status_icon = "🟢" if "trycloudflare.com" in base_url else "🟠"
-    net_mode = "Cloudflare 隧道 (公网)" if "trycloudflare.com" in base_url else "局域网 (内网)"
+    is_tunnel = "trycloudflare.com" in base_url
+    status_icon = "🟢" if is_tunnel else "🟠"
+    net_mode = "Cloudflare 隧道 (公网)" if is_tunnel else "局域网 (内网)"
 
+    # Status message
     text = (
         "👋 **PikPak Termux Bot**\n"
         f"运行状态: 🟢 在线\n"
         f"网络模式: {status_icon} {net_mode}\n"
-        f"服务地址: `{base_url}`\n\n"
-        "👇 点击下方菜单开始使用:"
+        f"服务地址: `{base_url}`\n"
     )
+    
+    if not is_tunnel:
+        text += "\n⚠️ **未检测到隧道域名**\n在线播放将仅限局域网访问。若需公网访问，请检查 Cloudflare 进程是否启动 (`pm2 logs cf-tunnel`)。"
+
+    text += "\n👇 点击下方菜单开始使用:"
+    
     await context.bot.send_message(update.effective_chat.id, text, reply_markup=main_menu_keyboard(), parse_mode='Markdown')
 
 async def show_system_status(update, context):
@@ -68,8 +75,12 @@ async def show_system_status(update, context):
         f"🌐 **Web 服务**: `{base_url}`\n"
         f"📡 **连接模式**: {'✅ 隧道 (无视VPN)' if is_tunnel else '⚠️ 局域网 (仅限同WiFi)'}\n"
         f"🔌 **端口**: `{WEB_PORT}`\n\n"
-        "如果显示为局域网但你希望使用公网，请检查 Cloudflare 是否启动成功，或运行 `cat cf_tunnel.log` 查看错误。"
     )
+    
+    if is_tunnel:
+        info += "✅ 隧道运行正常，可直接在线播放。"
+    else:
+        info += "❌ **隧道未就绪**\n可能原因: 启动中、网络受限或进程崩溃。\n尝试: 终端运行 `./start.sh` 重启服务。"
     
     kb = [[InlineKeyboardButton("🔄 刷新状态", callback_data="status_refresh")]]
     await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=info, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
@@ -160,6 +171,12 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = update.effective_user.id
     
+    # 1. Rate Limit Check
+    if is_rate_limited(context.user_data):
+        try: await query.answer("✋ 操作太快，请稍候", show_alert=False)
+        except: pass
+        return
+
     print(f"[CB] {data} (User: {user_id})") # Debug log
     
     parts = data.split(':', 1)
@@ -187,12 +204,34 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Actions
         elif cmd == "act_link":
-            client = await account_mgr.get_client(user_id)
-            d = await client.get_download_url(arg)
-            if d.get('url'):
-                await context.bot.send_message(update.effective_chat.id, f"🔗 **直链**: `{d['url']}`", parse_mode='Markdown')
-                await query.answer()
-            else: await query.answer("无链接", show_alert=True)
+            # Direct Link Logic with Retry
+            try:
+                # Indicate loading via chat action
+                await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+                
+                client = await account_mgr.get_client(user_id)
+                d = await client.get_download_url(arg)
+                
+                # Retry once if url is missing (maybe token expired)
+                if not d or not d.get('url'):
+                    client = await account_mgr.get_client(user_id, force_refresh=True)
+                    d = await client.get_download_url(arg)
+                
+                if d and d.get('url'):
+                    url = d['url']
+                    await context.bot.send_message(
+                        update.effective_chat.id, 
+                        f"🔗 **直链获取成功**:\n\n`{url}`", 
+                        parse_mode='Markdown',
+                        disable_web_page_preview=True
+                    )
+                    await query.answer()
+                else: 
+                    await query.answer("❌ 无法获取 (文件处理中?)", show_alert=True)
+            except Exception as e:
+                logger.error(f"Link Error: {e}")
+                await query.answer("获取失败，请重试", show_alert=True)
+
         elif cmd == "act_ren":
             context.user_data['renaming_id'] = arg
             await context.bot.send_message(update.effective_chat.id, "✏️ 请回复新文件名:", reply_markup=ForceReply(selective=True))

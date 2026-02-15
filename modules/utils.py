@@ -3,6 +3,7 @@ import socket
 import re
 import os
 import logging
+import time
 
 logger = logging.getLogger("Utils")
 
@@ -38,14 +39,11 @@ def get_base_url(port):
             with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
                 # Matches https://[random].trycloudflare.com
-                # Cloudflared log format usually: "INF +--------------------------------------------------------------------------------------------+"
-                # "INF |  Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):  |"
-                # "INF |  https://fragrant-smoke-8899.trycloudflare.com                                            |"
                 matches = re.findall(r'(https://[a-zA-Z0-9-]+\.trycloudflare\.com)', content)
                 
                 if matches:
                     url = matches[-1] # Get the latest one
-                    logger.info(f"Found Cloudflare Tunnel: {url}")
+                    # logger.info(f"Found Cloudflare Tunnel: {url}")
                     return url
         except Exception as e:
             logger.error(f"Error reading tunnel log: {e}")
@@ -53,8 +51,17 @@ def get_base_url(port):
             
     # Fallback to local IP
     local_ip = get_local_ip()
-    logger.info(f"Using Local IP: {local_ip}")
+    # logger.info(f"Using Local IP: {local_ip}")
     return f"http://{local_ip}:{port}"
+
+def is_rate_limited(user_data, limit=0.8):
+    """Simple rate limiter to prevent spamming"""
+    now = time.time()
+    last = user_data.get('last_interaction', 0)
+    if now - last < limit:
+        return True
+    user_data['last_interaction'] = now
+    return False
 
 def format_bytes(size):
     if not size: return "0 B"

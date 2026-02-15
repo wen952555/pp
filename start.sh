@@ -21,9 +21,10 @@ if [ -f "./cloudflared" ]; then
     touch cf_tunnel.log
     
     # Start Cloudflared
-    # We use --logfile to write directly to a file we can read from python
-    # We output to both file and stdout for PM2
-    pm2 start "./cloudflared tunnel --url http://localhost:8080 --logfile ./cf_tunnel.log --metrics localhost:49582" --name "cf-tunnel"
+    # --protocol http2: Fixes issues with QUIC on some networks/VPNs
+    # --no-autoupdate: Prevents restart loops due to update checks
+    # --retries 10: Retry connection if failed
+    pm2 start "./cloudflared tunnel --url http://localhost:8080 --protocol http2 --no-autoupdate --logfile ./cf_tunnel.log" --name "cf-tunnel"
     
     echo -e "${CYAN}⏳ 等待隧道建立 (5秒)...${NC}"
     sleep 5
@@ -57,6 +58,6 @@ echo -e "\n${GREEN}====================================${NC}"
 echo -e "   🚀 所有服务已启动"
 echo -e "${GREEN}====================================${NC}"
 echo -e "🤖 Bot 状态: ${CYAN}pm2 log pikpak-bot${NC}"
-echo -e "🌐 隧道日志: ${CYAN}cat cf_tunnel.log${NC}"
+echo -e "🌐 隧道日志: ${CYAN}tail -f cf_tunnel.log${NC}"
 echo -e "🗂️ AList: ${CYAN}http://127.0.0.1:5244${NC}"
 echo -e "\n⚠️ 请在 Telegram Bot 中发送 /start 查看获取到的域名状态"

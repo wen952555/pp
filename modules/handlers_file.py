@@ -6,6 +6,7 @@ import time
 import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
 from telegram.ext import ContextTypes
+from telegram.error import BadRequest
 from .accounts import account_mgr
 from .config import WEB_PORT, DOWNLOAD_PATH
 from .utils import get_local_ip, get_base_url, format_bytes
@@ -15,7 +16,12 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
     user_id = update.effective_user.id
     
     if edit_msg and update.callback_query:
-        try: await update.callback_query.edit_message_text("⏳ 数据请求中...", parse_mode='Markdown')
+        try: 
+            # Temporary loading text to prevent "Button already pressed" feeling
+            # But don't do this if we want to be super fast, 
+            # though it helps user know something is happening.
+            # However, for pagination, direct switch is better.
+            pass 
         except: pass
 
     client = await account_mgr.get_client(user_id)
@@ -144,8 +150,16 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         if edit_msg:
-            try: await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-            except: pass
+            try: 
+                await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+            except BadRequest as e:
+                # Ignore "Message is not modified" errors (Anti-Flood)
+                if "not modified" in str(e):
+                    pass
+                else:
+                    await update.callback_query.answer("⚠️ 加载失败", show_alert=False)
+            except Exception as e:
+                pass
         else:
             await context.bot.send_message(update.effective_chat.id, text, reply_markup=reply_markup, parse_mode='Markdown')
 
@@ -165,11 +179,12 @@ async def show_file_options(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     user_id = update.effective_user.id
     client = await account_mgr.get_client(user_id)
     try:
+        # Get base url (refresh log check)
+        base_url = get_base_url(WEB_PORT)
+        
         data = await client.get_download_url(file_id)
         name = data.get('name', 'Unknown')
         
-        # USE TUNNEL URL IF AVAILABLE
-        base_url = get_base_url(WEB_PORT)
         play_link = f"{base_url}/play?id={file_id}&user={user_id}"
         
         text = f"📄 **{name}**"
