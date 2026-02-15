@@ -20,6 +20,10 @@ WHITELIST_FILE = "whitelist.txt"
 ACCOUNTS_FILE = "accounts.json"
 WEB_PORT = 8080
 
+# Proxy Support
+HTTP_PROXY = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
+HTTPS_PROXY = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
+
 # Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -29,7 +33,10 @@ logger = logging.getLogger("PikPakBot")
 
 # Auth Helper
 def get_whitelist():
-    ids = [str(ADMIN_ID)] if ADMIN_ID else []
+    ids = []
+    if ADMIN_ID:
+        ids.append(str(ADMIN_ID).strip())
+    
     if os.path.exists(WHITELIST_FILE):
         with open(WHITELIST_FILE, 'r') as f:
             for line in f:
@@ -37,8 +44,22 @@ def get_whitelist():
     return ids
 
 async def check_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    user_id = str(update.effective_user.id)
-    if user_id not in get_whitelist():
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⛔ 无权访问 (ID: {user_id})")
+    if not update.effective_user:
         return False
+        
+    user_id = str(update.effective_user.id)
+    allowed_ids = get_whitelist()
+    
+    # DEBUG PRINT
+    print(f"[DEBUG] Msg from {user_id}. Whitelist: {allowed_ids}")
+
+    if not allowed_ids:
+        print("[WARN] Whitelist is empty! Please check ADMIN_ID in .env")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="⛔ **配置错误**: 管理员 ID 未设置，无法使用。")
+        return False
+
+    if user_id not in allowed_ids:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⛔ 无权访问 (ID: `{user_id}`)")
+        return False
+        
     return True

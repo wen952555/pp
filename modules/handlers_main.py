@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 # --- UTILS ---
 async def reset_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"[CMD] Reset by {update.effective_user.id}")
     context.user_data.clear()
     await context.bot.send_message(update.effective_chat.id, "✅ 状态已重置，请重新操作。", reply_markup=main_menu_keyboard())
 
@@ -31,74 +32,96 @@ def main_menu_keyboard():
 
 # --- START ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"[CMD] Start by {update.effective_user.id}")
     if not await check_auth(update, context): return
     context.user_data.clear()
-    await context.bot.send_message(update.effective_chat.id, "👋 **PikPak Bot Ready**", reply_markup=main_menu_keyboard(), parse_mode='Markdown')
+    
+    text = (
+        "👋 **PikPak Termux Bot**\n"
+        "状态: 🟢 在线\n\n"
+        "👇 点击下方菜单开始使用:"
+    )
+    await context.bot.send_message(update.effective_chat.id, text, reply_markup=main_menu_keyboard(), parse_mode='Markdown')
 
 async def login_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update, context): return
     if len(context.args) < 2:
-        await context.bot.send_message(update.effective_chat.id, "Usage: `/login email pass`", parse_mode='Markdown')
+        await context.bot.send_message(update.effective_chat.id, "❌ 格式: `/login 邮箱 密码`", parse_mode='Markdown')
         return
-    account_mgr.add_account_credentials(context.args[0], context.args[1])
-    if await account_mgr.switch_account(update.effective_user.id, context.args[0]):
-        await context.bot.send_message(update.effective_chat.id, "✅ Login Success")
+    
+    email = context.args[0]
+    pwd = context.args[1]
+    
+    msg = await context.bot.send_message(update.effective_chat.id, "⏳ 登录中...")
+    account_mgr.add_account_credentials(email, pwd)
+    
+    if await account_mgr.switch_account(update.effective_user.id, email):
+        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"✅ 登录成功: {email}")
     else:
-        await context.bot.send_message(update.effective_chat.id, "❌ Login Failed")
+        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text="❌ 登录失败，请检查密码")
 
 # --- MENUS ---
 async def show_accounts_menu(update, context):
-    accounts = account_mgr.get_accounts_list()
-    active = account_mgr.active_user_map.get(str(update.effective_user.id))
-    kb = []
-    for u in accounts:
-        icn = "🟢" if u == active else "⚪️"
-        kb.append([InlineKeyboardButton(f"{icn} {u}", callback_data=f"acc_switch:{u}"), InlineKeyboardButton("❌", callback_data=f"acc_del:{u}")])
-    kb.append([InlineKeyboardButton("➕ Add Account", callback_data="acc_add")])
-    kb.append([InlineKeyboardButton("🔙 Close", callback_data="close_menu")])
-    msg = f"👥 Accounts (Active: {active})"
-    if update.callback_query: await update.callback_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
-    else: await context.bot.send_message(update.effective_chat.id, msg, reply_markup=InlineKeyboardMarkup(kb))
+    try:
+        accounts = account_mgr.get_accounts_list()
+        active = account_mgr.active_user_map.get(str(update.effective_user.id))
+        kb = []
+        for u in accounts:
+            icn = "🟢" if u == active else "⚪️"
+            kb.append([InlineKeyboardButton(f"{icn} {u}", callback_data=f"acc_switch:{u}"), InlineKeyboardButton("❌ 删除", callback_data=f"acc_del:{u}")])
+        kb.append([InlineKeyboardButton("➕ 添加账号", callback_data="acc_add")])
+        kb.append([InlineKeyboardButton("🔙 关闭", callback_data="close_menu")])
+        msg = f"👥 **账号管理** (当前: `{active}`)"
+        
+        if update.callback_query: await update.callback_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        else: await context.bot.send_message(update.effective_chat.id, msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    except Exception as e:
+        print(f"[ERR] Show Accounts: {e}")
+        await context.bot.send_message(update.effective_chat.id, "❌ 菜单加载失败")
 
 async def initiate_add_account(update, context):
     context.user_data['adding_account'] = True
-    await context.bot.send_message(update.effective_chat.id, "👤 Reply: `email password`", reply_markup=ForceReply(selective=True), parse_mode='Markdown')
+    await context.bot.send_message(update.effective_chat.id, "👤 请直接回复: `邮箱 密码`\n(用空格分隔)", reply_markup=ForceReply(selective=True), parse_mode='Markdown')
     if update.callback_query: await update.callback_query.answer()
 
 async def process_add_account(update, context, text):
     if text.lower() in ['cancel', '取消']:
         del context.user_data['adding_account']
-        await context.bot.send_message(update.effective_chat.id, "Canceled")
+        await context.bot.send_message(update.effective_chat.id, "🚫 已取消")
         return
+        
     parts = text.replace("：", " ").replace(":", " ").split()
     if len(parts) < 2:
-        await context.bot.send_message(update.effective_chat.id, "❌ Format: `Email Password`")
+        await context.bot.send_message(update.effective_chat.id, "❌ 格式错误，请回复: `邮箱 密码`")
         return
     
     try: await update.message.delete()
     except: pass
     
     email, pwd = parts[0].strip(), parts[1].strip()
-    msg = await context.bot.send_message(update.effective_chat.id, "⏳ Verifying...")
+    msg = await context.bot.send_message(update.effective_chat.id, f"⏳ 正在验证 `{email}`...")
+    
     account_mgr.add_account_credentials(email, pwd)
     
     if await account_mgr.switch_account(update.effective_user.id, email):
-        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"✅ Logged in as {email}")
+        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"✅ **登录成功**\n欢迎回来，{email}")
         if 'adding_account' in context.user_data: del context.user_data['adding_account']
     else:
-        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text="❌ Login Failed. Try again.")
+        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text="❌ 登录失败 (密码错误?)")
 
 async def show_quota_info(update, context):
+    msg = await context.bot.send_message(update.effective_chat.id, "⏳ 查询中...")
     client = await account_mgr.get_client(update.effective_user.id)
     if not client: 
-        await context.bot.send_message(update.effective_chat.id, "Not logged in")
+        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text="⚠️ 未登录")
         return
     try:
         info = await client.get_quota_info()
         limit, usage = int(info.get('quota', 1)), int(info.get('usage', 0))
         pct = (usage/limit)*100
-        await context.bot.send_message(update.effective_chat.id, f"☁️ Storage: {format_bytes(usage)} / {format_bytes(limit)} ({pct:.1f}%)")
-    except Exception as e: await context.bot.send_message(update.effective_chat.id, f"Error: {e}")
+        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"☁️ **空间状态**\n已用: {format_bytes(usage)}\n总计: {format_bytes(limit)}\n占比: `{pct:.1f}%`", parse_mode='Markdown')
+    except Exception as e: 
+        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"❌ 失败: {e}")
 
 # --- CALLBACK ROUTER ---
 async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -106,152 +129,164 @@ async def router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = update.effective_user.id
     
-    logger.info(f"CB: {data}")
+    print(f"[CB] {data} (User: {user_id})") # Debug log
     
     parts = data.split(':', 1)
     cmd = parts[0]
     arg = parts[1] if len(parts) > 1 and parts[1] not in ["", "None"] else None
 
-    if cmd == "noop": await query.answer()
-    elif cmd == "close_menu": await query.delete_message()
-    
-    # File System
-    elif cmd == "ls": await show_file_list(update, context, parent_id=arg, edit_msg=True)
-    elif cmd == "file": await show_file_options(update, context, arg)
-    elif cmd == "page":
-        # Format: page:PID:NUM
-        # PID is "SEARCH" or real ID
-        try:
-            sub = arg.split(':')
-            pid = sub[0] if sub[0] != "" else None
-            page = int(sub[1])
-            await show_file_list(update, context, parent_id=pid, page=page, edit_msg=True)
-        except: await show_file_list(update, context, edit_msg=True)
+    # Handle Errors gracefully
+    try:
+        if cmd == "noop": await query.answer()
+        elif cmd == "close_menu": await query.delete_message()
+        
+        # File System
+        elif cmd == "ls": await show_file_list(update, context, parent_id=arg, edit_msg=True)
+        elif cmd == "file": await show_file_options(update, context, arg)
+        elif cmd == "page":
+            try:
+                sub = arg.split(':')
+                pid = sub[0] if sub[0] != "" else None
+                page = int(sub[1])
+                await show_file_list(update, context, parent_id=pid, page=page, edit_msg=True)
+            except: await show_file_list(update, context, edit_msg=True)
 
-    # Actions
-    elif cmd == "act_link":
-        client = await account_mgr.get_client(user_id)
-        try:
-            d = await client.get_download_url(arg)
-            await context.bot.send_message(update.effective_chat.id, f"Link: `{d['url']}`", parse_mode='Markdown')
-            await query.answer()
-        except: await query.answer("Failed")
-    elif cmd == "act_ren":
-        context.user_data['renaming_id'] = arg
-        await context.bot.send_message(update.effective_chat.id, "New Name:", reply_markup=ForceReply(selective=True))
-        await query.answer()
-    elif cmd == "act_del":
-        client = await account_mgr.get_client(user_id)
-        try: 
-            await client.delete_file([arg])
-            await query.answer("Deleted")
-            await show_file_list(update, context, parent_id=None, edit_msg=True) # Reload root is safer since we don't know parent
-        except: await query.answer("Failed")
-    elif cmd == "act_cut":
-        context.user_data['clipboard'] = {'id': arg, 'op': 'move'}
-        await query.answer("Cut")
-        await show_file_list(update, context, edit_msg=True)
-
-    elif cmd == "paste":
-        cl = context.user_data.get('clipboard')
-        if cl:
+        # Actions
+        elif cmd == "act_link":
             client = await account_mgr.get_client(user_id)
-            try: 
+            d = await client.get_download_url(arg)
+            if d.get('url'):
+                await context.bot.send_message(update.effective_chat.id, f"🔗 **直链**: `{d['url']}`", parse_mode='Markdown')
+                await query.answer()
+            else: await query.answer("无链接", show_alert=True)
+        elif cmd == "act_ren":
+            context.user_data['renaming_id'] = arg
+            await context.bot.send_message(update.effective_chat.id, "✏️ 请回复新文件名:", reply_markup=ForceReply(selective=True))
+            await query.answer()
+        elif cmd == "act_del":
+            client = await account_mgr.get_client(user_id)
+            await client.delete_file([arg])
+            await query.answer("已删除")
+            # Try to refresh list? We don't know parent, so show root/current list if possible or just say deleted
+            # Ideally we reload previous list, but we don't have state.
+            await context.bot.send_message(update.effective_chat.id, "✅ 文件已删除")
+
+        elif cmd == "act_cut":
+            context.user_data['clipboard'] = {'id': arg, 'op': 'move'}
+            await query.answer("已剪切")
+            await context.bot.send_message(update.effective_chat.id, "✂️ 已剪切。请进入目标目录点击『粘贴』")
+
+        elif cmd == "paste":
+            cl = context.user_data.get('clipboard')
+            if cl:
+                await query.answer("移动中...")
+                client = await account_mgr.get_client(user_id)
                 await client.move_file([cl['id']], arg)
                 del context.user_data['clipboard']
-                await query.answer("Done")
+                await query.answer("成功")
                 await show_file_list(update, context, parent_id=arg, edit_msg=True)
-            except Exception as e: await query.answer(f"Err: {e}", show_alert=True)
-    elif cmd == "paste_cancel":
-        if 'clipboard' in context.user_data: del context.user_data['clipboard']
-        await show_file_list(update, context, edit_msg=True)
+        elif cmd == "paste_cancel":
+            if 'clipboard' in context.user_data: del context.user_data['clipboard']
+            await show_file_list(update, context, edit_msg=True)
 
-    # Accounts
-    elif cmd == "acc_switch":
-        if await account_mgr.switch_account(user_id, arg):
-            await query.answer("Switched")
+        # Accounts
+        elif cmd == "acc_switch":
+            await query.answer("切换中...")
+            if await account_mgr.switch_account(user_id, arg):
+                await show_accounts_menu(update, context)
+            else: await query.answer("切换失败")
+        elif cmd == "acc_add": await initiate_add_account(update, context)
+        elif cmd == "acc_del":
+            account_mgr.remove_account(arg)
             await show_accounts_menu(update, context)
-        else: await query.answer("Failed")
-    elif cmd == "acc_add": await initiate_add_account(update, context)
-    elif cmd == "acc_del":
-        account_mgr.remove_account(arg)
-        await show_accounts_menu(update, context)
 
-    # Tools
-    elif cmd.startswith("tool_"):
-        if "m3u" in cmd: await generate_playlist(update, context, arg, 'm3u')
-        elif "size" in cmd: await calculate_folder_size(update, context, arg)
-        elif "regex" in cmd: await initiate_regex_rename(update, context, arg)
-        elif "dedupe" in cmd: await deduplicate_folder(update, context, arg)
-        elif "alist" in cmd: await context.bot.send_message(update.effective_chat.id, f"AList: http://{get_local_ip()}:5244")
-        elif "clearcache" in cmd: 
-            if os.path.exists(DOWNLOAD_PATH): shutil.rmtree(DOWNLOAD_PATH)
-            await query.answer("Cleared")
+        # Tools
+        elif cmd.startswith("tool_"):
+            if "m3u" in cmd: await generate_playlist(update, context, arg, 'm3u')
+            elif "size" in cmd: await calculate_folder_size(update, context, arg)
+            elif "regex" in cmd: await initiate_regex_rename(update, context, arg)
+            elif "dedupe" in cmd: await deduplicate_folder(update, context, arg)
+            elif "alist" in cmd: await context.bot.send_message(update.effective_chat.id, f"🗂 AList: http://{WEB_PORT}:5244 (Local IP)")
+            elif "clearcache" in cmd: 
+                if os.path.exists(DOWNLOAD_PATH): shutil.rmtree(DOWNLOAD_PATH)
+                await query.answer("缓存已清空")
 
-    # Tasks
-    elif cmd == "tasks_refresh": await show_offline_tasks(update, context)
-    elif cmd.startswith("task_del"): await handle_task_action(update, context)
+        # Tasks
+        elif cmd == "tasks_refresh": await show_offline_tasks(update, context)
+        elif cmd.startswith("task_del"): await handle_task_action(update, context)
 
-    # Cross Copy
-    elif cmd == "x_copy_menu": await show_cross_copy_menu(update, context, arg)
-    elif cmd.startswith("x_copy_do"):
-        sub = arg.split(':', 1)
-        await execute_cross_copy(update, context, sub[0], sub[1])
-    elif cmd == "confirm_dedupe":
-        ids = context.user_data.get('dedupe_ids')
-        client = await account_mgr.get_client(user_id)
-        if ids: await client.delete_file(ids)
-        del context.user_data['dedupe_ids']
-        await query.answer("Cleaned")
-    
-    elif cmd == "trash_empty":
-        client = await account_mgr.get_client(user_id)
-        try: await client.empty_trash()
-        except: await client.trash_empty()
-        await query.answer("Empty")
+        # Cross Copy
+        elif cmd == "x_copy_menu": await show_cross_copy_menu(update, context, arg)
+        elif cmd.startswith("x_copy_do"):
+            sub = arg.split(':', 1)
+            await execute_cross_copy(update, context, sub[0], sub[1])
+        elif cmd == "confirm_dedupe":
+            ids = context.user_data.get('dedupe_ids')
+            if ids:
+                client = await account_mgr.get_client(user_id)
+                await client.delete_file(ids)
+            del context.user_data['dedupe_ids']
+            await query.answer("清理完成")
+        
+        elif cmd == "trash_empty":
+            await query.answer("执行中...")
+            client = await account_mgr.get_client(user_id)
+            try: await client.empty_trash()
+            except: await client.trash_empty()
+            await query.answer("回收站已清空")
+            
+    except Exception as e:
+        print(f"[ERR] CB Error: {e}")
+        try: await query.answer("操作失败 (查看日志)", show_alert=True)
+        except: pass
 
 # --- TEXT ROUTER ---
 async def router_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update, context): return
     msg = update.message.text.strip()
+    print(f"[TXT] {msg} (User: {update.effective_user.id})")
     
+    # 1. Add Account State
     if context.user_data.get('adding_account'):
         await process_add_account(update, context, msg)
         return
     
+    # 2. Rename State
     if context.user_data.get('renaming_id'):
         client = await account_mgr.get_client(update.effective_user.id)
         try: await client.rename_file(context.user_data['renaming_id'], msg)
         except: pass
         del context.user_data['renaming_id']
-        await context.bot.send_message(update.effective_chat.id, "Renamed")
+        await context.bot.send_message(update.effective_chat.id, "✅ 重命名成功")
         return
 
+    # 3. Regex State
     if context.user_data.get('regex_context'):
         await process_regex_rename(update, context, msg)
         return
         
+    # 4. Search State
     if context.user_data.get('searching'):
         del context.user_data['searching']
         await show_file_list(update, context, search_query=msg)
         return
 
-    # Menu Commands
+    # 5. Commands
     if msg == "📂 文件管理": await show_file_list(update, context)
     elif msg == "👥 账号管理": await show_accounts_menu(update, context)
     elif msg == "📉 离线任务": await show_offline_tasks(update, context)
     elif msg == "☁️ 空间/VIP": await show_quota_info(update, context)
     elif msg == "🔍 搜索文件":
         context.user_data['searching'] = True
-        await context.bot.send_message(update.effective_chat.id, "🔍 Keywords:", reply_markup=ForceReply(selective=True))
-    elif msg == "➕ 添加任务": await context.bot.send_message(update.effective_chat.id, "Send Magnet/URL")
+        await context.bot.send_message(update.effective_chat.id, "🔍 请输入关键词:", reply_markup=ForceReply(selective=True))
+    elif msg == "➕ 添加任务": await context.bot.send_message(update.effective_chat.id, "📥 请直接发送磁力链接或 URL")
     elif msg == "🛠 极客工具箱":
-        kb = [[InlineKeyboardButton("AList", callback_data="tool_alist"), InlineKeyboardButton("Clear Cache", callback_data="tool_clearcache")]]
-        await context.bot.send_message(update.effective_chat.id, "Tools", reply_markup=InlineKeyboardMarkup(kb))
+        kb = [[InlineKeyboardButton("AList 信息", callback_data="tool_alist"), InlineKeyboardButton("清理缓存", callback_data="tool_clearcache")]]
+        await context.bot.send_message(update.effective_chat.id, "🛠 工具箱", reply_markup=InlineKeyboardMarkup(kb))
     elif msg == "🧹 垃圾清理":
-         kb = [[InlineKeyboardButton("Empty Trash", callback_data="trash_empty")]]
-         await context.bot.send_message(update.effective_chat.id, "Sure?", reply_markup=InlineKeyboardMarkup(kb))
+         kb = [[InlineKeyboardButton("🗑 确认清空回收站", callback_data="trash_empty")]]
+         await context.bot.send_message(update.effective_chat.id, "⚠️ 确认清空?", reply_markup=InlineKeyboardMarkup(kb))
     
-    # Auto Add Task
+    # 6. Auto Add Task
     elif "http" in msg or "magnet" in msg:
         await add_download_task(update, context, msg)
