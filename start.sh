@@ -10,61 +10,51 @@ echo -e "${CYAN}正在启动服务 (PM2)...${NC}"
 # Check PM2
 if ! command -v pm2 >/dev/null 2>&1; then npm install pm2 -g; fi
 
+# Check & Install Proot (Crucial for unpatched binaries like cloudflared to find /etc/resolv.conf)
+if ! command -v termux-chroot >/dev/null 2>&1; then
+    echo -e "${YELLOW}正在安装 proot (用于解决 DNS 路径问题)...${NC}"
+    pkg install proot -y
+fi
+
 # Stop existing
 pm2 stop all >/dev/null 2>&1
 pm2 delete all >/dev/null 2>&1
 
 # --- DNS FIX START ---
-# Fix typical Termux DNS issue where it points to local IPv6 which fails for static Go binaries
-# Termux usually has PREFIX set. If not, try to guess.
-if [ -z "$PREFIX" ]; then
-    PREFIX="/data/data/com.termux/files/usr"
-fi
-
+# Force rewrite of resolv.conf to ensure we have a working resolver accessible inside proot
+if [ -z "$PREFIX" ]; then PREFIX="/data/data/com.termux/files/usr"; fi
 RESOLV_CONF="$PREFIX/etc/resolv.conf"
 
-# Check if we can write to it
 if [ -d "$(dirname "$RESOLV_CONF")" ]; then
-    DNS_NEEDS_FIX=false
-    
-    if [ ! -f "$RESOLV_CONF" ]; then
-        DNS_NEEDS_FIX=true
-    elif grep -q "::1" "$RESOLV_CONF"; then
-        DNS_NEEDS_FIX=true
+    echo -e "${YELLOW}🔧 强制配置 DNS (8.8.8.8)...${NC}"
+    # Backup if exists and not already backed up
+    if [ -f "$RESOLV_CONF" ] && [ ! -f "${RESOLV_CONF}.bak" ]; then 
+        cp "$RESOLV_CONF" "${RESOLV_CONF}.bak"
     fi
-
-    if [ "$DNS_NEEDS_FIX" = true ]; then
-        echo -e "${YELLOW}🔧 正在修复 Termux DNS 配置 (使用 8.8.8.8)...${NC}"
-        # Backup if exists
-        if [ -f "$RESOLV_CONF" ]; then cp "$RESOLV_CONF" "${RESOLV_CONF}.bak"; fi
-        
-        # Overwrite with reliable DNS
-        echo "nameserver 8.8.8.8" > "$RESOLV_CONF"
-        echo "nameserver 1.1.1.1" >> "$RESOLV_CONF"
-    fi
+    # Overwrite with reliable IPv4 DNS
+    echo "nameserver 8.8.8.8" > "$RESOLV_CONF"
+    echo "nameserver 1.1.1.1" >> "$RESOLV_CONF"
 fi
 # --- DNS FIX END ---
 
 # 1. Start Cloudflared Tunnel (if installed)
 if [ -f "./cloudflared" ]; then
     echo -e "${GREEN}配置 Cloudflare Tunnel...${NC}"
-    # Clear previous log
     rm -f cf_tunnel.log
     touch cf_tunnel.log
     
-    # Create a wrapper script to handle retries and prevent PM2 crash loops
+    # Create a wrapper script
+    # We uses `termux-chroot` to map $PREFIX/etc/resolv.conf to /etc/resolv.conf
+    # This allows the standard linux cloudflared binary to resolve domains correctly.
     cat > run_tunnel.sh <<EOF
 #!/bin/bash
 echo "--- Starting Tunnel Wrapper ---"
-# Force Go DNS resolver to avoid cgo issues on Android
 export GODEBUG=netdns=go
 
 while true; do
-    echo "[Wrapper] Starting cloudflared..."
-    # 1. Use 127.0.0.1 instead of localhost
-    # 2. --edge-ip-version 4: Force IPv4 for edge connection
-    # 3. --protocol http2: Most stable on Android
-    ./cloudflared tunnel --url http://127.0.0.1:8080 --protocol http2 --edge-ip-version 4 --no-autoupdate --logfile ./cf_tunnel.log
+    echo "[Wrapper] Starting cloudflared with termux-chroot..."
+    # termux-chroot simulates standard Linux FS layout
+    termux-chroot ./cloudflared tunnel --url http://127.0.0.1:8080 --protocol http2 --edge-ip-version 4 --no-autoupdate --logfile ./cf_tunnel.log
     
     echo "[Wrapper] Cloudflared exited. Sleeping 10s before retry..."
     sleep 10
@@ -93,7 +83,7 @@ fi
 echo -e "${GREEN}启动 Telegram Bot...${NC}"
 pm2 start bot.py --name "pikpak-bot" --interpreter python --log ./bot.log
 
-# Save PM2 list for auto-resurrect
+# Save PM2 list
 pm2 save
 
 # Auto-start setup
