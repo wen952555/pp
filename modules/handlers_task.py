@@ -143,8 +143,10 @@ async def start_playlist_stream(update, context):
         resp = alist_mgr.get_file_info(item['path'])
         if resp and resp.get('code') == 200:
             raw_url = resp['data']['raw_url']
+            # Fix URL appending logic: Check if ? exists
             if resp['data'].get('sign'):
-                raw_url += f"?sign={resp['data']['sign']}"
+                separator = "&" if "?" in raw_url else "?"
+                raw_url += f"{separator}sign={resp['data']['sign']}"
             resolved_files.append(raw_url)
     
     if not resolved_files:
@@ -165,9 +167,10 @@ async def start_playlist_stream(update, context):
     await stop_stream(update, context, silent=True)
 
     # 6. Build FFmpeg Command
-    # -loglevel error: reduce log spam
+    # Added User-Agent to avoid 403 Forbidden on some drives (like PikPak)
     cmd = [
         "ffmpeg",
+        "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "-re", 
         "-f", "concat",
         "-safe", "0",
@@ -175,7 +178,7 @@ async def start_playlist_stream(update, context):
         "-i", playlist_path,
         "-c", "copy",
         "-f", "flv",
-        "-loglevel", "warning", # Only show warnings and errors
+        "-loglevel", "info", # Increased verbosity to debug 403/connections
         rtmp_url
     ]
 
@@ -203,7 +206,7 @@ async def start_playlist_stream(update, context):
             f"📄 文件数: {len(resolved_files)}\n"
             f"🔑 目标: {context.user_data.get('selected_key_name')}\n"
             f"📝 日志: 已记录到 `{STREAM_LOG_FILE}`\n\n"
-            f"若画面黑屏，请点击刷新查看日志。",
+            f"若画面黑屏，请点击【查看日志】下载完整日志进行排查。",
             parse_mode='Markdown'
         )
         # Immediately show status panel
@@ -252,7 +255,7 @@ async def show_stream_status(update, context, new_msg=False):
     kb.append(row1)
     
     # Add Log View Button
-    kb.append([InlineKeyboardButton("📝 查看日志 (最后20行)", callback_data="stream_log")])
+    kb.append([InlineKeyboardButton("📝 查看/下载日志", callback_data="stream_log")])
         
     reply_markup = InlineKeyboardMarkup(kb)
     
@@ -266,23 +269,37 @@ async def view_stream_log(update, context):
     if not os.path.exists(STREAM_LOG_FILE):
         await update.callback_query.answer("❌ 暂无日志文件", show_alert=True)
         return
-        
+    
+    chat_id = update.effective_chat.id
+    
+    # 1. Send Full Log File (This ensures "All" logs are seen)
     try:
-        # Read last 20 lines
-        with open(STREAM_LOG_FILE, "rb") as f:
-            try: f.seek(-2000, os.SEEK_END) # Go to end approx
-            except: pass # File too small
-            lines = f.readlines()
-            last_lines = lines[-20:]
-            decoded_lines = [l.decode('utf-8', errors='ignore').strip() for l in last_lines]
-            
-        log_content = "\n".join(decoded_lines)
-        if not log_content: log_content = "日志文件为空。"
-        
-        # Escape markdown chars if needed, or use code block
-        msg = f"📝 **FFmpeg 日志 (最后片段):**\n\n```\n{log_content}\n```"
-        
-        await context.bot.send_message(update.effective_chat.id, msg, parse_mode='Markdown')
-        await update.callback_query.answer()
+        with open(STREAM_LOG_FILE, 'rb') as f:
+             await context.bot.send_document(
+                chat_id=chat_id,
+                document=f,
+                filename="stream_debug.log",
+                caption="📄 **完整推流日志文件**",
+                parse_mode='Markdown'
+            )
     except Exception as e:
-        await update.callback_query.answer(f"读取日志失败: {e}", show_alert=True)
+        await context.bot.send_message(chat_id, f"❌ 发送日志文件失败: {e}")
+
+    # 2. Show Preview (Text)
+    try:
+        # Read last 3000 chars for preview
+        with open(STREAM_LOG_FILE, "rb") as f:
+            try: f.seek(-3000, os.SEEK_END) # Go to end approx
+            except: f.seek(0) # File too small
+            content = f.read().decode('utf-8', errors='ignore')
+            
+        if content:
+            lines = [l for l in content.splitlines() if l.strip()]
+            preview = "\n".join(lines[-30:]) # Show last 30 lines
+            
+            msg = f"📝 **日志预览 (最后部分):**\n```\n{preview}\n```"
+            await context.bot.send_message(chat_id, msg, parse_mode='Markdown')
+    except Exception as e:
+        pass
+        
+    await update.callback_query.answer()
