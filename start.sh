@@ -106,7 +106,23 @@ fi
 echo -e "\n${GREEN}====================================${NC}"
 echo -e "   🚀 所有服务已启动"
 echo -e "${GREEN}====================================${NC}"
+
+# Extract URL
+TUNNEL_URL=""
+if [ -f "cf_tunnel.log" ]; then
+    # Try to find the URL in the logs
+    TUNNEL_URL=$(grep -o 'https://.*\.trycloudflare\.com' cf_tunnel.log | head -n 1)
+fi
+
 echo -e "🤖 Bot 状态: ${CYAN}pm2 log pikpak-bot${NC}"
 echo -e "🌐 隧道日志: ${CYAN}tail -f cf_tunnel.log${NC}"
 echo -e "🗂️ AList: ${CYAN}http://127.0.0.1:5244${NC}"
-echo -e "\n⚠️ 请在 Telegram Bot 中发送 /start 查看获取到的域名状态"
+
+if [ -n "$TUNNEL_URL" ]; then
+    echo -e "\n${GREEN}✅ 隧道建立成功!${NC}"
+    echo -e "🔗 公网访问地址: ${YELLOW}$TUNNEL_URL${NC}"
+else
+    echo -e "\n${YELLOW}⏳ 正在获取公网地址 (请稍后在 Telegram Bot 中输入 /start 查看)${NC}"
+fi
+
+echo -e "\n⚠️ 如果 Bot 无响应，请使用 'pm2 log pikpak-bot' 查看报错。"
