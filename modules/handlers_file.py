@@ -14,12 +14,10 @@ from .utils import get_local_ip, format_bytes
 async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, parent_id=None, page=0, edit_msg=False, search_query=None):
     user_id = update.effective_user.id
     
-    # 0. UI Feedback
     if edit_msg and update.callback_query:
         try: await update.callback_query.edit_message_text("⏳ 数据请求中...", parse_mode='Markdown')
         except: pass
 
-    # 1. Client Check
     client = await account_mgr.get_client(user_id)
     if not client:
         text = "⚠️ **未登录**\n请前往 [👥 账号管理] 菜单登录。"
@@ -29,38 +27,19 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         else: await context.bot.send_message(update.effective_chat.id, text, parse_mode='Markdown')
         return
 
-    # 2. Sanitize Inputs
     if parent_id in ["None", "", "root"]: parent_id = None
     
-    # FIX: Handle Search Query State to prevent CallbackData Overflow
-    # If search_query is passed (new search), save it. 
-    # If None, check if we are "paging" a previous search (indicated by a flag or just implicit context)
-    # Actually, simpler: Store current view state in user_data
     if search_query:
         context.user_data['current_search_query'] = search_query
     
-    # If we are just paging (parent_id is None) and we have a stored search, assume we are paging the search
-    # But we need to distinguish between "Browsing Root" and "Searching"
-    # Logic: The `show_file_list` call from `router_callback` will pass `search_query=None`.
-    # We need to rely on the caller to know if we are in search mode.
-    # To simplify: The callback `page:pid:num` will be used.
-    # If `pid` is "SEARCH", we retrieve query from user_data.
-
     active_search = None
     if parent_id == "SEARCH":
         active_search = context.user_data.get('current_search_query')
-        parent_id = None # Reset for API call
+        parent_id = None
     elif search_query:
         active_search = search_query
-    else:
-        # Normal browsing, clear search context to avoid confusion
-        if 'current_search_query' in context.user_data and parent_id != "SEARCH":
-            # Only clear if we are explicitly navigating away? 
-            # For safety, let's just use local variable logic.
-            pass
 
     try:
-        # 3. API Call
         try:
             resp = await client.file_list(parent_id=parent_id)
         except Exception as e:
@@ -74,7 +53,6 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         raw_files = resp.get('files', []) if isinstance(resp, dict) else resp
         if not isinstance(raw_files, list): raw_files = []
 
-        # 4. Filter (Search)
         files = []
         if active_search:
             is_regex = active_search.startswith("re:")
@@ -90,10 +68,8 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         else:
             files = raw_files
 
-        # 5. Sort
         files.sort(key=lambda x: (x.get('kind') != 'drive#folder', x.get('name', '') or ''))
 
-        # 6. Pagination
         items_per_page = 10
         total_items = len(files)
         max_page = max(0, (total_items - 1) // items_per_page)
@@ -103,12 +79,9 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         end_idx = start_idx + items_per_page
         current_files = files[start_idx:end_idx]
 
-        # 7. Build UI
         keyboard = []
         
-        # Nav Top
         nav_top = []
-        # Back Logic
         if active_search or parent_id:
              nav_top.append(InlineKeyboardButton("🏠 首页", callback_data="ls:"))
         
@@ -116,27 +89,21 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         nav_top.append(InlineKeyboardButton("🔄 刷新", callback_data=f"ls:{refresh_pid}"))
         keyboard.append(nav_top)
 
-        # File List
         for f in current_files:
             name = f.get('name', 'Unknown')
             fid = f['id']
-            # Truncate name for display
             dname = name[:20] + ".." if len(name) > 20 else name
             
             if f.get('kind') == 'drive#folder':
                 keyboard.append([
                     InlineKeyboardButton(f"📁 {dname}", callback_data=f"ls:{fid}"),
-                    InlineKeyboardButton("⚙️", callback_data=f"act_ren:{fid}") # Use rename as entry to options
+                    InlineKeyboardButton("⚙️", callback_data=f"act_ren:{fid}")
                 ])
             else:
                 sz = format_bytes(f.get('size', 0))
                 keyboard.append([InlineKeyboardButton(f"📄 {dname} ({sz})", callback_data=f"file:{fid}")])
 
-        # Pagination Rows
         nav_row = []
-        # Critical: Keep callback data short!
-        # Format: page:PID:NUM
-        # If active_search, PID is "SEARCH" (special keyword)
         page_pid = "SEARCH" if active_search else (parent_id if parent_id else "")
         
         if page > 0:
@@ -149,7 +116,6 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         
         keyboard.append(nav_row)
 
-        # Tools
         if not active_search:
             tool_pid = parent_id if parent_id else ""
             keyboard.append([
@@ -158,7 +124,6 @@ async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, par
                 InlineKeyboardButton("🛠 批量", callback_data=f"tool_regex:{tool_pid}")
             ])
 
-        # Paste
         if 'clipboard' in context.user_data:
             op = "移动" if context.user_data['clipboard']['op'] == 'move' else "复制"
             paste_pid = parent_id if parent_id else ""
@@ -222,9 +187,6 @@ async def show_file_options(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     except Exception as e:
         await update.callback_query.edit_message_text(f"❌ 失败: {e}")
-
-# ... (Include other tools like calculate_folder_size, initiate_regex_rename, etc. using same pattern) ...
-# To ensure previous functionality is not lost, I'm including the abbreviated versions which work correctly.
 
 async def calculate_folder_size(update, context, folder_id):
     if update.callback_query: await update.callback_query.answer("计算中...")
@@ -312,3 +274,58 @@ async def execute_cross_copy(update, context, file_id, target):
         await update.callback_query.edit_message_text(f"✅ Sent to {target}")
     except Exception as e: await update.callback_query.edit_message_text(f"Error: {e}")
 
+async def upload_tg_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    client = await account_mgr.get_client(user_id)
+    if not client: 
+        await context.bot.send_message(update.effective_chat.id, "⚠️ 请先登录")
+        return
+
+    # Check for document, video, or photo
+    attachment = None
+    filename = "file_" + str(int(time.time()))
+
+    if update.message.document:
+        attachment = update.message.document
+        filename = attachment.file_name or filename
+    elif update.message.video:
+        attachment = update.message.video
+        filename = f"video_{int(time.time())}.mp4"
+    elif update.message.photo:
+        # Photo is a list, get last
+        attachment = update.message.photo[-1]
+        filename = f"photo_{int(time.time())}.jpg"
+    
+    if not attachment:
+        await context.bot.send_message(update.effective_chat.id, "⚠️ 无法获取文件")
+        return
+
+    f_size = attachment.file_size
+    if f_size > 50 * 1024 * 1024:
+        await context.bot.send_message(update.effective_chat.id, "⚠️ Telegram Bot API 限制上传 50MB 以下文件。")
+        return
+
+    msg = await context.bot.send_message(update.effective_chat.id, "⬇️ 正在下载到 Termux...")
+    try:
+        file_obj = await attachment.get_file()
+        
+        if not os.path.exists(DOWNLOAD_PATH): os.makedirs(DOWNLOAD_PATH)
+        local_path = os.path.join(DOWNLOAD_PATH, filename)
+        
+        await file_obj.download_to_drive(local_path)
+        
+        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text="⬆️ 正在上传到 PikPak...")
+        
+        # Upload
+        try:
+            # Assuming pikpakapi uses upload_file(path)
+            await client.upload_file(local_path)
+            await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"✅ 上传成功: `{filename}`", parse_mode='Markdown')
+        except Exception as e:
+             await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"❌ 上传失败: {e}")
+
+        # Cleanup
+        if os.path.exists(local_path): os.remove(local_path)
+
+    except Exception as e:
+        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"❌ 处理出错: {e}")

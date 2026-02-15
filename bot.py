@@ -43,11 +43,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
             )
         except: pass
 
-# Pre-middleware to log everything
-async def log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user:
-        print(f"📨 [MSG] From {update.effective_user.first_name} ({update.effective_user.id}): {update.message.text if update.message else '<Action>'}")
-
 # Helper: Async File Wrapper
 async def handle_document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update, context): return
@@ -81,6 +76,13 @@ async def check_quota_job(context):
                 await context.bot.send_message(ADMIN_ID, f"⚠️ **空间告警**: 使用量已超过 95%!")
     except: pass
 
+async def on_startup(context: ContextTypes.DEFAULT_TYPE):
+    if ADMIN_ID:
+        try:
+            await context.bot.send_message(chat_id=ADMIN_ID, text="🤖 **PikPak Bot 已启动**\nTermux 服务已就绪。", parse_mode='Markdown')
+        except Exception as e:
+            print(f"Failed to send startup message: {e}")
+
 if __name__ == '__main__':
     if not BOT_TOKEN:
         print("❌ Error: BOT_TOKEN is missing in .env")
@@ -99,32 +101,28 @@ if __name__ == '__main__':
 
     # 2. Build App
     try:
-        app = ApplicationBuilder().token(BOT_TOKEN).request(req).build()
+        app = ApplicationBuilder().token(BOT_TOKEN).request(req).post_init(on_startup).build()
     except Exception as e:
         print(f"❌ Failed to initialize Bot: {e}")
         sys.exit(1)
     
     # 3. Register Handlers
-    # -- Middleware --
-    # app.add_handler(MessageHandler(filters.ALL, log_update), group=-1) # Optional debug logging
-
-    # -- Commands --
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('reset', reset_state))
     app.add_handler(CommandHandler('login', login_cmd))
     
-    # -- Callback --
     app.add_handler(CallbackQueryHandler(router_callback))
     
-    # -- Text & Files --
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), router_text))
+    
+    # Document Handler (for .txt lists)
     app.add_handler(MessageHandler(filters.Document.MimeType("text/plain") | filters.Document.FileExtension("txt"), handle_document_upload))
+    
+    # Generic File Handler (Upload to PikPak)
     app.add_handler(MessageHandler(filters.ATTACHMENT & (~filters.Document.MimeType("text/plain")), upload_tg_file))
 
-    # -- Errors --
     app.add_error_handler(error_handler)
 
-    # -- Jobs --
     if app.job_queue:
         app.job_queue.run_repeating(check_quota_job, interval=3600, first=60)
 
@@ -138,8 +136,6 @@ if __name__ == '__main__':
 
     # 5. Run
     print("✅ Bot is running! Waiting for updates...")
-    print("👉 If no response, check your VPN/Proxy settings.")
-    
     try:
         app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
     except Exception as e:
