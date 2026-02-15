@@ -61,9 +61,10 @@ export SSL_CERT_FILE=/etc/tls/cert.pem
 
 while true; do
     echo "[Wrapper] Starting cloudflared with termux-chroot..."
-    # termux-chroot simulates standard Linux FS layout
-    # $PREFIX/etc/tls/cert.pem -> /etc/tls/cert.pem
-    termux-chroot ./cloudflared tunnel --url http://127.0.0.1:8080 --protocol http2 --edge-ip-version 4 --no-autoupdate --logfile ./cf_tunnel.log
+    # Removed --protocol http2 to allow Cloudflared to auto-negotiate (usually QUIC)
+    # This often fixes "TLS handshake EOF" errors on mobile networks.
+    
+    termux-chroot ./cloudflared tunnel --url http://127.0.0.1:8080 --edge-ip-version 4 --no-autoupdate --logfile ./cf_tunnel.log
     
     echo "[Wrapper] Cloudflared exited. Sleeping 10s before retry..."
     sleep 10
