@@ -45,37 +45,7 @@ if [ -d "$(dirname "$RESOLV_CONF")" ]; then
 fi
 # --- DNS FIX END ---
 
-# 1. Start Cloudflared Tunnel (if installed)
-if [ -f "./cloudflared" ]; then
-    echo -e "${GREEN}配置 Cloudflare Tunnel...${NC}"
-    rm -f cf_tunnel.log
-    touch cf_tunnel.log
-    
-    cat > run_tunnel.sh <<EOF
-#!/bin/bash
-echo "--- Starting Tunnel Wrapper ---"
-export GODEBUG=netdns=go
-export SSL_CERT_FILE=/etc/tls/cert.pem
-
-while true; do
-    echo "[Wrapper] Starting cloudflared with termux-chroot..."
-    termux-chroot ./cloudflared tunnel --url http://127.0.0.1:8080 --protocol http2 --edge-ip-version 4 --no-autoupdate --logfile ./cf_tunnel.log
-    echo "[Wrapper] Cloudflared exited. Sleeping 10s before retry..."
-    sleep 10
-done
-EOF
-    chmod +x run_tunnel.sh
-
-    echo -e "${GREEN}启动 Cloudflare Tunnel (Wrapper)...${NC}"
-    pm2 start ./run_tunnel.sh --name "cf-tunnel"
-    
-    echo -e "${CYAN}⏳ 等待隧道建立 (5秒)...${NC}"
-    sleep 5
-else
-    echo -e "${YELLOW}⚠️ 未找到 Cloudflared，将只使用局域网IP${NC}"
-fi
-
-# 2. Start AList
+# 1. Start AList
 if [ -f "./alist" ]; then
     echo -e "${GREEN}启动 AList Server...${NC}"
     pm2 start ./alist --name "alist" -- server
@@ -83,7 +53,7 @@ else
     echo -e "${YELLOW}⚠️ 未找到 AList 可执行文件${NC}"
 fi
 
-# 3. Start Bot
+# 2. Start Bot
 echo -e "${GREEN}启动 Telegram Bot...${NC}"
 pm2 start bot.py --name "alist-bot" --interpreter python --log ./bot.log
 
@@ -101,19 +71,6 @@ echo -e "\n${GREEN}====================================${NC}"
 echo -e "   🚀 所有服务已启动"
 echo -e "${GREEN}====================================${NC}"
 
-# Extract URL
-TUNNEL_URL=""
-if [ -f "cf_tunnel.log" ]; then
-    TUNNEL_URL=$(grep -o 'https://.*\.trycloudflare\.com' cf_tunnel.log | head -n 1)
-fi
-
 echo -e "🤖 Bot 状态: ${CYAN}pm2 log alist-bot${NC}"
-echo -e "🌐 隧道日志: ${CYAN}tail -f cf_tunnel.log${NC}"
 echo -e "🗂️ AList: ${CYAN}http://127.0.0.1:5244${NC}"
-
-if [ -n "$TUNNEL_URL" ]; then
-    echo -e "\n${GREEN}✅ 隧道建立成功!${NC}"
-    echo -e "🔗 公网访问地址: ${YELLOW}$TUNNEL_URL${NC}"
-else
-    echo -e "\n${YELLOW}⏳ 正在获取公网地址 (请稍后在 Telegram Bot 中输入 /start 查看)${NC}"
-fi
+echo -e "${YELLOW}⚠️ 已移除隧道，Web 播放仅支持局域网访问。${NC}"

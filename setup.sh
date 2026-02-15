@@ -9,24 +9,24 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}=========================================${NC}"
-echo -e "${GREEN}    AList Termux Bot + Streaming 部署    ${NC}"
+echo -e "${GREEN}    AList Termux Bot (Lite Ver) 部署    ${NC}"
 echo -e "${GREEN}=========================================${NC}"
 
 # Define Config Path
 ENV_FILE="../.env"
 
 # 1. Update packages
-echo -e "\n${CYAN}[1/7] 检查系统环境...${NC}"
+echo -e "\n${CYAN}[1/6] 检查系统环境...${NC}"
 pkg update -y || termux-change-repo
 
 # 2. Install Python & Node.js
-echo -e "\n${CYAN}[2/7] 安装运行环境...${NC}"
+echo -e "\n${CYAN}[2/6] 安装运行环境...${NC}"
 if ! command -v python >/dev/null 2>&1; then pkg install python -y; fi
 if ! command -v node >/dev/null 2>&1; then pkg install nodejs -y; fi
 
 # 3. Install System Tools (Ensure FFmpeg is installed for streaming)
-echo -e "\n${CYAN}[3/7] 安装系统工具...${NC}"
-for pkg in git ffmpeg aria2 wget tar proot ca-certificates; do
+echo -e "\n${CYAN}[3/6] 安装系统工具...${NC}"
+for pkg in git ffmpeg wget tar proot ca-certificates; do
     if ! command -v $pkg >/dev/null 2>&1 && [ "$pkg" != "ca-certificates" ]; then
         echo -e "${GREEN}[+] 安装 $pkg...${NC}"
         pkg install $pkg -y
@@ -42,7 +42,7 @@ if ! command -v pm2 >/dev/null 2>&1; then
 fi
 
 # 4. Install AList
-echo -e "\n${CYAN}[4/7] 安装 AList...${NC}"
+echo -e "\n${CYAN}[4/6] 安装 AList...${NC}"
 if [ -f "alist" ]; then
     echo -e "${GREEN}[-] AList 已安装${NC}"
 else
@@ -58,27 +58,12 @@ else
     fi
 fi
 
-# 5. Install Cloudflared
-echo -e "\n${CYAN}[5/7] 安装 Cloudflare Tunnel...${NC}"
-if [ -f "cloudflared" ]; then
-    echo -e "${GREEN}[-] Cloudflared 已安装${NC}"
-else
-    echo -e "${YELLOW}正在下载 Cloudflared (Linux/Arm64)...${NC}"
-    wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64 -O cloudflared
-    if [ $? -eq 0 ]; then
-        chmod +x cloudflared
-        echo -e "${GREEN}[+] Cloudflared 安装成功${NC}"
-    else
-        echo -e "${RED}❌ Cloudflared 下载失败，请手动下载。${NC}"
-    fi
-fi
-
-# 6. Install Python Dependencies
-echo -e "\n${CYAN}[6/7] 安装 Python 依赖...${NC}"
+# 5. Install Python Dependencies
+echo -e "\n${CYAN}[5/6] 安装 Python 依赖...${NC}"
 pip install -r requirements.txt
 
-# 7. Configuration
-echo -e "\n${CYAN}[7/7] 配置 Bot 信息${NC}"
+# 6. Configuration
+echo -e "\n${CYAN}[6/6] 配置 Bot 信息${NC}"
 if [ ! -f "$ENV_FILE" ]; then
     echo -e "${YELLOW}请输入以下信息:${NC}"
     read -p "Telegram Bot Token: " BOT_TOKEN
@@ -95,7 +80,6 @@ fi
 # Finalize
 echo -e "\n${CYAN}设置完成${NC}"
 chmod +x start.sh
-mkdir -p downloads
 
 # Generate AList password once
 if [ -f "alist" ]; then

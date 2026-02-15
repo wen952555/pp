@@ -17,10 +17,8 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from modules.config import BOT_TOKEN, ADMIN_ID, HTTPS_PROXY, check_auth, WEB_PORT
-from modules.player import start_web_server
+from modules.config import BOT_TOKEN, ADMIN_ID, HTTPS_PROXY, check_auth
 from modules.handlers_main import start, router_callback, router_text, reset_state, login_cmd
-from modules.utils import get_base_url
 
 # Configure Logging
 logging.basicConfig(
@@ -35,18 +33,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     print(f"❌ [ERROR] {context.error}")
 
 async def on_startup(context: ContextTypes.DEFAULT_TYPE):
-    # 1. Start Web Server
-    try:
-        await start_web_server()
-        logger.info("✅ Web Server started")
-    except Exception as e:
-        logger.error(f"❌ Web Server failed: {e}")
-
-    # 2. Notify Admin
+    # Notify Admin
     if ADMIN_ID:
         try:
-            base_url = get_base_url(WEB_PORT)
-            msg = f"🤖 **AList Bot 已启动**\nTermux 服务已就绪。\nURL: `{base_url}`"
+            msg = f"🤖 **AList Bot 已启动 (Live Mode)**\n服务已就绪。"
             await context.bot.send_message(chat_id=ADMIN_ID, text=msg, parse_mode='Markdown')
         except: pass
 
@@ -55,7 +45,7 @@ if __name__ == '__main__':
         print("❌ Error: BOT_TOKEN is missing in .env")
         sys.exit(1)
 
-    print("🚀 Starting Bot...")
+    print("🚀 Starting Bot (Streamer Mode)...")
     
     # Network Config
     req = None

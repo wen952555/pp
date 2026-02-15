@@ -1,7 +1,6 @@
 
 import requests
 import logging
-import json
 from .config import ALIST_HOST, ALIST_USER, ALIST_PASS
 
 logger = logging.getLogger("AList")
@@ -101,36 +100,6 @@ class AListManager:
             r = requests.post(url, json=payload, headers=self.get_headers())
             return r.json()
         except Exception as e: return {"code": 500, "message": str(e)}
-
-    # --- Storage & Offline ---
-
-    def admin_storage_list(self):
-        url = f"{self.host}/api/admin/storage/list"
-        try:
-            r = requests.get(url, headers=self.get_headers())
-            return r.json()
-        except: return None
-
-    def add_offline_download(self, url, path):
-        """Add offline download task"""
-        # Note: API format depends on AList version, trying standard
-        api_url = f"{self.host}/api/fs/add_offline_download"
-        # Often requires tool config (aria2/qbit). Simple implementation:
-        payload = {
-            "url": url,
-            "path": path
-        }
-        try:
-            r = requests.post(api_url, json=payload, headers=self.get_headers())
-            return r.json()
-        except Exception as e: return {"code": 500, "message": str(e)}
-        
-    def list_offline_tasks(self, status="downloading"):
-         # This usually requires admin access to specific tools, 
-         # generic task list endpoint might not be exposed easily in standard API 
-         # without knowing the specific tool (aria2 etc). 
-         # Skipping complex task list for now to avoid errors.
-         return None
 
 # Singleton
 alist_mgr = AListManager()
