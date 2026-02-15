@@ -1,8 +1,6 @@
 
 python-telegram-bot[job-queue]
-pikpakapi>=0.0.1
 python-dotenv
-yt-dlp
 requests
 aiohttp
 nest_asyncio

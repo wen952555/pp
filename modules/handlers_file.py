@@ -1,433 +1,139 @@
 
-import re
-import io
-import zipfile
-import time
-import os
-import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
+import urllib.parse
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from telegram.error import BadRequest
-from .accounts import account_mgr
-from .config import WEB_PORT, DOWNLOAD_PATH, global_cache
-from .utils import get_local_ip, get_base_url, format_bytes
+from .accounts import alist_mgr
+from .config import global_cache, WEB_PORT
+from .utils import format_bytes, get_base_url
+from .handlers_task import start_stream_process
 
-# --- FILE LISTING ---
-async def show_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, parent_id=None, page=0, edit_msg=False, search_query=None):
-    user_id = update.effective_user.id
+async def show_alist_files(update: Update, context: ContextTypes.DEFAULT_TYPE, path="/", page=1, edit_msg=False):
+    # AList API List
+    if path == "": path = "/"
     
-    # Immediate UI Feedback
-    if edit_msg and update.callback_query:
-        try: 
-            # If page > 0, don't show alert to keep it smooth
-            if page == 0: await update.callback_query.answer("🔄 加载中...")
-            else: await update.callback_query.answer()
+    # Cache key
+    cache_key = f"alist_list_{path}_{page}"
+    cached = global_cache.get(cache_key)
+    
+    data = None
+    if cached:
+        data = cached
+    else:
+        resp = alist_mgr.list_files(path, page=page)
+        if resp and resp.get('code') == 200:
+            data = resp['data']
+            global_cache.set(cache_key, data, ttl=60) # Cache 1 min
+    
+    if not data:
+        msg = "❌ 无法连接 AList 或 Token 过期"
+        if edit_msg: await update.callback_query.edit_message_text(msg)
+        else: await context.bot.send_message(update.effective_chat.id, msg)
+        return
+
+    content = data.get('content', [])
+    total = data.get('total', 0)
+    
+    # Sorting: Folders first
+    content.sort(key=lambda x: (not x['is_dir'], x['name']))
+    
+    # Build Keyboard
+    keyboard = []
+    
+    # Parent Dir
+    if path != "/":
+        parent = "/" + "/".join(path.strip("/").split("/")[:-1])
+        keyboard.append([InlineKeyboardButton("🔙 返回上一级", callback_data=f"ls:{parent}")])
+
+    # Items
+    for item in content:
+        name = item['name']
+        is_dir = item['is_dir']
+        full_path = f"{path}/{name}".replace("//", "/")
+        
+        # Safe callback data (path can be long)
+        # We assume paths fit in 64 bytes usually, or we need a map. 
+        # For simple use, we send path directly. 
+        # If path too long, AList IDs are not stable, so we rely on path.
+        
+        if len(full_path.encode('utf-8')) > 50:
+             # Very basic truncation for UI, but might break logic if deep
+             pass 
+
+        if is_dir:
+            keyboard.append([InlineKeyboardButton(f"📁 {name}", callback_data=f"ls:{full_path}")])
+        else:
+            size = format_bytes(item['size'])
+            keyboard.append([InlineKeyboardButton(f"📄 {name} ({size})", callback_data=f"file:{full_path}")])
+
+    # Controls
+    nav = []
+    nav.append(InlineKeyboardButton("🔄 刷新", callback_data=f"ls_force:{path}"))
+    keyboard.append(nav)
+
+    text = f"📂 **文件列表**\n路径: `{path}`\n总数: {total}"
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if edit_msg:
+        try: await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
         except: pass
+    else:
+        await context.bot.send_message(update.effective_chat.id, text, reply_markup=reply_markup, parse_mode='Markdown')
 
-    client = await account_mgr.get_client(user_id)
-    if not client:
-        text = "⚠️ **未登录**\n请前往 [👥 账号管理] 菜单登录。"
-        if edit_msg: 
-            try: await update.callback_query.edit_message_text(text, parse_mode='Markdown')
-            except: pass
-        else: await context.bot.send_message(update.effective_chat.id, text, parse_mode='Markdown')
+async def show_alist_file_action(update, context, path):
+    if update.callback_query: await update.callback_query.answer("获取中...")
+    
+    resp = alist_mgr.get_file_info(path)
+    if not resp or resp.get('code') != 200:
+        await update.callback_query.edit_message_text("❌ 获取文件信息失败")
         return
 
-    # Normalize parent_id
-    if parent_id in ["None", "", "root"]: parent_id = None
+    data = resp['data']
+    name = data['name']
+    raw_url = data['raw_url']
+    sign = data.get('sign', '')
     
-    # Handle Search Context
-    if search_query:
-        context.user_data['current_search_query'] = search_query
+    # Construct full URL
+    # If raw_url is relative or needs signing
+    full_url = raw_url
+    if sign and 'sign=' not in full_url:
+        full_url += f"?sign={sign}" if '?' not in full_url else f"&sign={sign}"
+
+    # Web Player Link
+    # Encode URL
+    encoded_url = urllib.parse.quote(full_url)
+    encoded_name = urllib.parse.quote(name)
+    base_url = get_base_url(WEB_PORT)
+    # We can use the generic player endpoint if we adapted it, 
+    # but here we can just use the AList raw link for external players
     
-    active_search = None
-    if parent_id == "SEARCH":
-        active_search = context.user_data.get('current_search_query')
-        parent_id = None
-    elif search_query:
-        active_search = search_query
-
-    try:
-        files = []
-        cache_key = f"files_{user_id}_{parent_id}_{active_search}"
-        
-        # 1. Try Cache
-        cached_data = global_cache.get(cache_key)
-        if cached_data:
-            files = cached_data
-        else:
-            # 2. Fetch API
-            try:
-                resp = await client.file_list(parent_id=parent_id)
-            except Exception as e:
-                # Retry logic
-                client = await account_mgr.get_client(user_id, force_refresh=True)
-                if client:
-                    resp = await client.file_list(parent_id=parent_id)
-                else:
-                    raise e
-
-            raw_files = resp.get('files', []) if isinstance(resp, dict) else resp
-            if not isinstance(raw_files, list): raw_files = []
-
-            # Filter if search
-            if active_search:
-                is_regex = active_search.startswith("re:")
-                term = active_search[3:] if is_regex else active_search
-                for f in raw_files:
-                    fname = f.get('name', '') or ''
-                    if is_regex:
-                        try: 
-                            if re.search(term, fname, re.IGNORECASE): files.append(f)
-                        except: pass
-                    else:
-                        if term.lower() in fname.lower(): files.append(f)
-            else:
-                files = raw_files
-            
-            # Save to Cache (TTL 5 mins)
-            global_cache.set(cache_key, files, ttl=300)
-
-        # --- Sorting Logic ---
-        # Get sort pref: 'name' (default), 'date', 'size'
-        sort_mode = account_mgr.get_user_pref(user_id, 'sort', 'name')
-        
-        # Helper for safe parsing
-        def get_date(f):
-            t = f.get('created_time') or f.get('modified_time')
-            if not t: return 0
-            try: return datetime.datetime.fromisoformat(t.replace('Z', '+00:00')).timestamp()
-            except: return 0
-            
-        def get_size(f):
-            try: return int(f.get('size', 0))
-            except: return 0
-
-        # Always put folders first
-        folders = [f for f in files if f.get('kind') == 'drive#folder']
-        non_folders = [f for f in files if f.get('kind') != 'drive#folder']
-
-        if sort_mode == 'date':
-            folders.sort(key=get_date, reverse=True)
-            non_folders.sort(key=get_date, reverse=True)
-            sort_icon = "🕒 时间"
-        elif sort_mode == 'size':
-            folders.sort(key=get_size, reverse=True)
-            non_folders.sort(key=get_size, reverse=True)
-            sort_icon = "📊 大小"
-        else: # Name
-            folders.sort(key=lambda x: x.get('name', '').lower())
-            non_folders.sort(key=lambda x: x.get('name', '').lower())
-            sort_icon = "🔤 名称"
-
-        files = folders + non_folders
-
-        # Pagination
-        items_per_page = 10
-        total_items = len(files)
-        max_page = max(0, (total_items - 1) // items_per_page)
-        if page > max_page: page = max_page
-        
-        start_idx = page * items_per_page
-        end_idx = start_idx + items_per_page
-        current_files = files[start_idx:end_idx]
-
-        # Build Keyboard
-        keyboard = []
-        
-        # Top Nav
-        nav_top = []
-        refresh_pid = "SEARCH" if active_search else (parent_id if parent_id else "")
-        if active_search or parent_id:
-             nav_top.append(InlineKeyboardButton("🏠 首页", callback_data="ls:"))
-        
-        # Force refresh button (bypasses cache logic in router)
-        nav_top.append(InlineKeyboardButton("🔄 刷新", callback_data=f"ls_force:{refresh_pid}"))
-        
-        # Sort Toggle Button (Cycles: Name -> Date -> Size -> Name)
-        next_sort_map = {'name': 'date', 'date': 'size', 'size': 'name'}
-        next_sort = next_sort_map.get(sort_mode, 'name')
-        nav_top.append(InlineKeyboardButton(f"⇅ {sort_icon}", callback_data=f"sort_toggle:{next_sort}"))
-        
-        keyboard.append(nav_top)
-
-        # File List
-        for f in current_files:
-            name = f.get('name', 'Unknown')
-            fid = f['id']
-            # Truncate middle if too long
-            if len(name) > 25:
-                dname = name[:12] + ".." + name[-10:]
-            else:
-                dname = name
-            
-            if f.get('kind') == 'drive#folder':
-                keyboard.append([
-                    InlineKeyboardButton(f"📁 {dname}", callback_data=f"ls:{fid}"),
-                    InlineKeyboardButton("⚙️", callback_data=f"act_ren:{fid}")
-                ])
-            else:
-                sz = format_bytes(f.get('size', 0))
-                keyboard.append([InlineKeyboardButton(f"📄 {dname} ({sz})", callback_data=f"file:{fid}")])
-
-        # Pagination Nav
-        nav_row = []
-        page_pid = "SEARCH" if active_search else (parent_id if parent_id else "")
-        
-        if page > 0:
-            nav_row.append(InlineKeyboardButton("⬅️", callback_data=f"page:{page_pid}:{page-1}"))
-        
-        nav_row.append(InlineKeyboardButton(f"{page+1}/{max_page+1}", callback_data="noop"))
-        
-        if page < max_page:
-            nav_row.append(InlineKeyboardButton("➡️", callback_data=f"page:{page_pid}:{page+1}"))
-        
-        keyboard.append(nav_row)
-
-        # Tools Row
-        if not active_search:
-            tool_pid = parent_id if parent_id else ""
-            keyboard.append([
-                InlineKeyboardButton("🎬 M3U", callback_data=f"tool_m3u:{tool_pid}"),
-                InlineKeyboardButton("📊 统计", callback_data=f"tool_size:{tool_pid}"),
-                InlineKeyboardButton("🛠 批量", callback_data=f"tool_regex:{tool_pid}")
-            ])
-
-        # Paste Context
-        if 'clipboard' in context.user_data:
-            op = "移动" if context.user_data['clipboard']['op'] == 'move' else "复制"
-            paste_pid = parent_id if parent_id else ""
-            keyboard.append([
-                InlineKeyboardButton(f"📋 粘贴{op}", callback_data=f"paste:{paste_pid}"),
-                InlineKeyboardButton("❌ 取消", callback_data="paste_cancel")
-            ])
-
-        # Header Info
-        # Replaced deprecated attribute access with method
-        username = account_mgr.get_user_pref(user_id, 'active_user', "Unknown")
-
-        if active_search:
-            path_str = f"🔍 搜索: `{active_search}`"
-        else:
-            path_str = f"📂 路径: `{parent_id if parent_id else '根目录'}`"
-            
-        text = f"👤 **{username}**\n{path_str}\n📦 文件数: {total_items} | 排序: {sort_icon}"
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        if edit_msg:
-            try: 
-                await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-            except BadRequest as e:
-                # Ignore message not modified
-                if "not modified" in str(e): pass
-                else: pass 
-            except Exception:
-                pass
-        else:
-            await context.bot.send_message(update.effective_chat.id, text, reply_markup=reply_markup, parse_mode='Markdown')
-
-    except Exception as e:
-        err_msg = f"❌ **列表加载出错**\n{str(e)}\n请尝试 `/reset` 重置。"
-        if edit_msg:
-            try: await update.callback_query.edit_message_text(err_msg, parse_mode='Markdown')
-            except: pass
-        else:
-            await context.bot.send_message(update.effective_chat.id, err_msg, parse_mode='Markdown')
-
-async def show_file_options(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str):
-    if update.callback_query:
-        try: await update.callback_query.answer("⏳ 获取中...") 
-        except: pass
-        
-    user_id = update.effective_user.id
-    client = await account_mgr.get_client(user_id)
-    try:
-        # Get base url (using cached version)
-        base_url = get_base_url(WEB_PORT)
-        
-        data = await client.get_download_url(file_id)
-        name = data.get('name', 'Unknown')
-        size = format_bytes(data.get('size', 0))
-        
-        play_link = f"{base_url}/play?id={file_id}&user={user_id}"
-        
-        text = f"📄 **{name}**\n📏 大小: {size}"
-        if "trycloudflare.com" in base_url:
-            text += f"\n🌐 **隧道在线** (可直接播放)"
-        else:
-            text += f"\n🏠 **局域网模式** (仅内网可用)"
-        
-        keyboard = [
-            [InlineKeyboardButton("🖥️ 在线播放 / 调用 APP", url=play_link)],
-            [InlineKeyboardButton("🔗 直链", callback_data=f"act_link:{file_id}"), InlineKeyboardButton("✏️ 重命名", callback_data=f"act_ren:{file_id}")],
-            [InlineKeyboardButton("✂️ 剪切", callback_data=f"act_cut:{file_id}"), InlineKeyboardButton("🗑 删除", callback_data=f"act_del:{file_id}")]
-        ]
-        
-        if len(account_mgr.get_accounts_list()) > 1:
-            keyboard.append([InlineKeyboardButton("🚀 跨号秒传", callback_data=f"x_copy_menu:{file_id}")])
-            
-        keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="ls:")])
-        
-        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-    except Exception as e:
-        await update.callback_query.edit_message_text(f"❌ 失败: {e}")
-
-async def calculate_folder_size(update, context, folder_id):
-    if update.callback_query: await update.callback_query.answer("后台计算中...")
-    user_id = update.effective_user.id
-    client = await account_mgr.get_client(user_id)
-    msg = await context.bot.send_message(update.effective_chat.id, "⏳ 正在递归计算文件夹大小，请稍候...")
-    try:
-        resp = await client.file_list(parent_id=folder_id)
-        files = resp.get('files', []) if isinstance(resp, dict) else resp
-        total = sum(int(f.get('size', 0)) for f in files)
-        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"📊 大小: {format_bytes(total)}")
-    except: pass
-
-async def initiate_regex_rename(update, context, folder_id):
-    context.user_data['regex_context'] = folder_id
-    await context.bot.send_message(update.effective_chat.id, "🛠 回复: `正则 替换`", reply_markup=ForceReply(selective=True))
-
-async def process_regex_rename(update, context, text):
-    folder_id = context.user_data.get('regex_context')
-    del context.user_data['regex_context']
-    try:
-        parts = text.split()
-        if len(parts) < 1: return
-        pat, repl = parts[0], parts[1] if len(parts)>1 else ""
-        client = await account_mgr.get_client(update.effective_user.id)
-        msg = await context.bot.send_message(update.effective_chat.id, "Processing...")
-        resp = await client.file_list(parent_id=folder_id)
-        count = 0
-        
-        # Invalidate cache for this folder
-        global_cache.set(f"files_{update.effective_user.id}_{folder_id}_None", None, ttl=0)
-        
-        for f in resp.get('files', []):
-            new_n = re.sub(pat, repl, f.get('name',''))
-            if new_n != f.get('name'):
-                await client.rename_file(file_id=f['id'], name=new_n)
-                count+=1
-        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"✅ Updated {count}")
-    except Exception as e:
-        await context.bot.send_message(update.effective_chat.id, f"Error: {e}")
-
-async def deduplicate_folder(update, context, folder_id):
-    if update.callback_query: await update.callback_query.answer("扫描中...")
-    client = await account_mgr.get_client(update.effective_user.id)
-    msg = await context.bot.send_message(update.effective_chat.id, "🔍 Scanning...")
-    try:
-        resp = await client.file_list(parent_id=folder_id)
-        seen, dupes = {}, []
-        for f in resp.get('files', []):
-            if f.get('hash') in seen: dupes.append(f)
-            else: seen[f.get('hash')] = f
-        if not dupes: await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text="✅ No duplicates")
-        else:
-            context.user_data['dedupe_ids'] = [x['id'] for x in dupes]
-            kb = [[InlineKeyboardButton("Delete Dupes", callback_data="confirm_dedupe")], [InlineKeyboardButton("Cancel", callback_data="close_menu")]]
-            await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"Found {len(dupes)} dupes", reply_markup=InlineKeyboardMarkup(kb))
-    except: pass
-
-async def generate_playlist(update, context, folder_id, mode='m3u'):
-    if update.callback_query: await update.callback_query.answer("生成中...")
-    client = await account_mgr.get_client(update.effective_user.id)
-    msg = await context.bot.send_message(update.effective_chat.id, "⏳ Generating...")
-    try:
-        resp = await client.file_list(parent_id=folder_id)
-        vids = [f for f in resp.get('files', []) if f.get('name','').endswith(('.mp4','.mkv'))]
-        out = io.BytesIO()
-        out.write("#EXTM3U\n".encode('utf-8'))
-        
-        base_url = get_base_url(WEB_PORT)
-        
-        for f in vids:
-             # Using direct API links for M3U playlist
-             d = await client.get_download_url(f['id'])
-             if d.get('url'): out.write(f"#EXTINF:-1,{f['name']}\n{d['url']}\n".encode('utf-8'))
-        
-        out.seek(0)
-        await context.bot.send_document(update.effective_chat.id, out, filename="list.m3u")
-        await context.bot.delete_message(update.effective_chat.id, msg.message_id)
-    except Exception as e:
-        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"Error: {e}")
-
-async def show_cross_copy_menu(update, context, file_id):
-    users = account_mgr.get_accounts_list()
-    # current_active = account_mgr.active_user_map.get(str(update.effective_user.id))
-    # Better to get from pref
-    current_active = account_mgr.get_user_pref(update.effective_user.id, 'active_user')
+    text = f"📄 **{name}**\n📏 大小: {format_bytes(data['size'])}"
     
-    kb = [[InlineKeyboardButton(f"To {u}", callback_data=f"x_copy_do:{file_id}:{u}")] for u in users if u != current_active]
-    kb.append([InlineKeyboardButton("Cancel", callback_data="close_menu")])
-    await update.callback_query.edit_message_text("Select Target:", reply_markup=InlineKeyboardMarkup(kb))
-
-async def execute_cross_copy(update, context, file_id, target):
-    client = await account_mgr.get_client(update.effective_user.id)
-    tgt = await account_mgr.get_client(update.effective_user.id, specific_username=target)
-    try:
-        d = await client.get_download_url(file_id)
-        await tgt.offline_download(d['url'])
-        await update.callback_query.edit_message_text(f"✅ Sent to {target}")
-    except Exception as e: await update.callback_query.edit_message_text(f"Error: {e}")
-
-async def upload_tg_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    client = await account_mgr.get_client(user_id)
-    if not client: 
-        await context.bot.send_message(update.effective_chat.id, "⚠️ 请先登录")
-        return
-
-    # Check for document, video, or photo
-    attachment = None
-    filename = "file_" + str(int(time.time()))
-
-    if update.message.document:
-        attachment = update.message.document
-        filename = attachment.file_name or filename
-    elif update.message.video:
-        attachment = update.message.video
-        filename = f"video_{int(time.time())}.mp4"
-    elif update.message.photo:
-        # Photo is a list, get last
-        attachment = update.message.photo[-1]
-        filename = f"photo_{int(time.time())}.jpg"
+    keyboard = [
+        [InlineKeyboardButton("📺 推流到 Telegram 直播", callback_data=f"do_stream:{path}")],
+        [InlineKeyboardButton("▶️ 调用本地播放器", url=f"intent:{full_url}#Intent;type=video/*;S.title={encoded_name};end")],
+        [InlineKeyboardButton("🔗 复制直链", callback_data="copy_link")], # Handle in callback
+        [InlineKeyboardButton("🔙 返回", callback_data=f"ls:{'/' + '/'.join(path.strip('/').split('/')[:-1])}")]
+    ]
     
-    if not attachment:
-        await context.bot.send_message(update.effective_chat.id, "⚠️ 无法获取文件")
-        return
+    # Store URL in context for copy/stream
+    context.user_data['temp_file_url'] = full_url
+    context.user_data['temp_file_name'] = name
+    
+    await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-    f_size = attachment.file_size
-    if f_size > 50 * 1024 * 1024:
-        await context.bot.send_message(update.effective_chat.id, "⚠️ Telegram Bot API 限制上传 50MB 以下文件。")
-        return
-
-    msg = await context.bot.send_message(update.effective_chat.id, "⬇️ 正在下载到 Termux...")
-    try:
-        file_obj = await attachment.get_file()
-        
-        if not os.path.exists(DOWNLOAD_PATH): os.makedirs(DOWNLOAD_PATH)
-        local_path = os.path.join(DOWNLOAD_PATH, filename)
-        
-        await file_obj.download_to_drive(local_path)
-        
-        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text="⬆️ 正在上传到 PikPak...")
-        
-        # Upload
-        try:
-            # Assuming pikpakapi uses upload_file(path)
-            await client.upload_file(local_path)
+async def handle_alist_action(update, context, action, payload):
+    if action == "do_stream":
+        # Get url from context if matched or fetch again
+        path = payload
+        resp = alist_mgr.get_file_info(path)
+        if resp and resp.get('code') == 200:
+            data = resp['data']
+            full_url = data['raw_url']
+            if data.get('sign'): full_url += f"?sign={data['sign']}"
+            await start_stream_process(update, context, full_url, data['name'])
+        else:
+            await update.callback_query.answer("无法获取链接")
             
-            # Clear Cache for current folder so user sees new file
-            global_cache.clear() 
-            
-            await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"✅ 上传成功: `{filename}`", parse_mode='Markdown')
-        except Exception as e:
-             await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"❌ 上传失败: {e}")
-
-        # Cleanup
-        if os.path.exists(local_path): os.remove(local_path)
-
-    except Exception as e:
-        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"❌ 处理出错: {e}")
+    elif action == "copy_link":
+        url = context.user_data.get('temp_file_url', 'Error')
+        await context.bot.send_message(update.effective_chat.id, f"🔗 `{url}`", parse_mode='Markdown')

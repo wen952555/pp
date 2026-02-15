@@ -9,24 +9,23 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}=========================================${NC}"
-echo -e "${GREEN}    PikPak Termux Bot + AList 部署      ${NC}"
+echo -e "${GREEN}    AList Termux Bot + Streaming 部署    ${NC}"
 echo -e "${GREEN}=========================================${NC}"
 
 # Define Config Path
 ENV_FILE="../.env"
 
 # 1. Update packages
-echo -e "\n${CYAN}[1/8] 检查系统环境...${NC}"
+echo -e "\n${CYAN}[1/7] 检查系统环境...${NC}"
 pkg update -y || termux-change-repo
 
 # 2. Install Python & Node.js
-echo -e "\n${CYAN}[2/8] 安装运行环境...${NC}"
+echo -e "\n${CYAN}[2/7] 安装运行环境...${NC}"
 if ! command -v python >/dev/null 2>&1; then pkg install python -y; fi
 if ! command -v node >/dev/null 2>&1; then pkg install nodejs -y; fi
 
-# 3. Install System Tools
-echo -e "\n${CYAN}[3/8] 安装系统工具...${NC}"
-# Added 'proot' and 'ca-certificates' for cloudflared compatibility
+# 3. Install System Tools (Ensure FFmpeg is installed for streaming)
+echo -e "\n${CYAN}[3/7] 安装系统工具...${NC}"
 for pkg in git ffmpeg aria2 wget tar proot ca-certificates; do
     if ! command -v $pkg >/dev/null 2>&1 && [ "$pkg" != "ca-certificates" ]; then
         echo -e "${GREEN}[+] 安装 $pkg...${NC}"
@@ -43,12 +42,11 @@ if ! command -v pm2 >/dev/null 2>&1; then
 fi
 
 # 4. Install AList
-echo -e "\n${CYAN}[4/8] 安装 AList...${NC}"
+echo -e "\n${CYAN}[4/7] 安装 AList...${NC}"
 if [ -f "alist" ]; then
     echo -e "${GREEN}[-] AList 已安装${NC}"
 else
     echo -e "${YELLOW}正在下载 AList (Android/Arm64)...${NC}"
-    # Download latest release for termux (usually arm64)
     wget https://github.com/alist-org/alist/releases/latest/download/alist-android-arm64.tar.gz -O alist.tar.gz
     if [ $? -eq 0 ]; then
         tar -zxvf alist.tar.gz
@@ -61,12 +59,11 @@ else
 fi
 
 # 5. Install Cloudflared
-echo -e "\n${CYAN}[5/8] 安装 Cloudflare Tunnel...${NC}"
+echo -e "\n${CYAN}[5/7] 安装 Cloudflare Tunnel...${NC}"
 if [ -f "cloudflared" ]; then
     echo -e "${GREEN}[-] Cloudflared 已安装${NC}"
 else
     echo -e "${YELLOW}正在下载 Cloudflared (Linux/Arm64)...${NC}"
-    # Termux on Android usually runs on aarch64 (arm64)
     wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64 -O cloudflared
     if [ $? -eq 0 ]; then
         chmod +x cloudflared
@@ -77,26 +74,26 @@ else
 fi
 
 # 6. Install Python Dependencies
-echo -e "\n${CYAN}[6/8] 安装 Python 依赖...${NC}"
+echo -e "\n${CYAN}[6/7] 安装 Python 依赖...${NC}"
 pip install -r requirements.txt
 
 # 7. Configuration
-echo -e "\n${CYAN}[7/8] 配置 Bot 信息${NC}"
+echo -e "\n${CYAN}[7/7] 配置 Bot 信息${NC}"
 if [ ! -f "$ENV_FILE" ]; then
     echo -e "${YELLOW}请输入以下信息:${NC}"
     read -p "Telegram Bot Token: " BOT_TOKEN
     read -p "Telegram Admin ID (数字ID): " ADMIN_ID
-    read -p "PikPak 用户名/邮箱: " PIKPAK_USER
-    read -p "PikPak 密码: " PIKPAK_PASS
-
+    
+    # Defaults for AList
     echo "BOT_TOKEN=$BOT_TOKEN" >> "$ENV_FILE"
     echo "ADMIN_ID=$ADMIN_ID" >> "$ENV_FILE"
-    echo "PIKPAK_USER=$PIKPAK_USER" >> "$ENV_FILE"
-    echo "PIKPAK_PASS=$PIKPAK_PASS" >> "$ENV_FILE"
+    echo "ALIST_HOST=http://127.0.0.1:5244" >> "$ENV_FILE"
+    echo "ALIST_USER=admin" >> "$ENV_FILE"
+    echo "ALIST_PASS=123456" >> "$ENV_FILE"
 fi
 
-# 8. Finalize
-echo -e "\n${CYAN}[8/8] 设置完成${NC}"
+# Finalize
+echo -e "\n${CYAN}设置完成${NC}"
 chmod +x start.sh
 mkdir -p downloads
 
@@ -105,7 +102,7 @@ if [ -f "alist" ]; then
     echo -e "${YELLOW}正在初始化 AList 密码...${NC}"
     ./alist admin set 123456 >/dev/null 2>&1
     echo -e "${GREEN}✅ AList 初始密码已重置为: 123456${NC}"
-    echo -e "${GREEN}   (您可以稍后在后台修改)${NC}"
+    echo -e "${GREEN}   (默认用户: admin, 默认密码: 123456)${NC}"
 fi
 
 echo -e "\n${GREEN}=========================================${NC}"
