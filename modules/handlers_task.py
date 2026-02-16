@@ -167,10 +167,10 @@ async def start_playlist_stream(update, context):
     await stop_stream(update, context, silent=True)
 
     # 6. Build FFmpeg Command
-    # Added User-Agent to avoid 403 Forbidden on some drives (like PikPak)
+    # Removed -user_agent as it caused 'Option not found' for concat input.
+    # The 403 error was primarily due to malformed URL (double ?sign=) which is fixed above.
     cmd = [
         "ffmpeg",
-        "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "-re", 
         "-f", "concat",
         "-safe", "0",
@@ -178,7 +178,7 @@ async def start_playlist_stream(update, context):
         "-i", playlist_path,
         "-c", "copy",
         "-f", "flv",
-        "-loglevel", "info", # Increased verbosity to debug 403/connections
+        "-loglevel", "info", 
         rtmp_url
     ]
 
