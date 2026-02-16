@@ -7,7 +7,7 @@ import json
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
 from telegram.ext import ContextTypes
-from .config import logger
+from .config import logger, HTTP_PROXY, HTTPS_PROXY
 from .accounts import alist_mgr
 
 # Global Stream State
@@ -167,10 +167,13 @@ async def start_playlist_stream(update, context):
     await stop_stream(update, context, silent=True)
 
     # 6. Build FFmpeg Command
-    # Removed -user_agent as it caused 'Option not found' for concat input.
-    # The 403 error was primarily due to malformed URL (double ?sign=) which is fixed above.
+    # Added reconnect options to handle network instability
     cmd = [
         "ffmpeg",
+        "-reconnect", "1",
+        "-reconnect_at_eof", "1", 
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "20",
         "-re", 
         "-f", "concat",
         "-safe", "0",
@@ -182,6 +185,11 @@ async def start_playlist_stream(update, context):
         rtmp_url
     ]
 
+    # Prepare Environment with Proxy
+    env = os.environ.copy()
+    if HTTP_PROXY: env["http_proxy"] = HTTP_PROXY
+    if HTTPS_PROXY: env["https_proxy"] = HTTPS_PROXY
+
     try:
         # Open log file
         log_file = open(STREAM_LOG_FILE, "w")
@@ -190,7 +198,8 @@ async def start_playlist_stream(update, context):
         process = subprocess.Popen(
             cmd, 
             stdout=subprocess.DEVNULL, 
-            stderr=log_file
+            stderr=log_file,
+            env=env  # Inject proxy env
         )
         
         stream_sessions[user_id] = {
@@ -205,7 +214,8 @@ async def start_playlist_stream(update, context):
             f"🚀 **推流已启动!**\n\n"
             f"📄 文件数: {len(resolved_files)}\n"
             f"🔑 目标: {context.user_data.get('selected_key_name')}\n"
-            f"📝 日志: 已记录到 `{STREAM_LOG_FILE}`\n\n"
+            f"📝 日志: 已记录到 `{STREAM_LOG_FILE}`\n"
+            f"🌐 代理: {'✅ 启用' if HTTPS_PROXY else '❌ 未配置'}\n\n"
             f"若画面黑屏，请点击【查看日志】下载完整日志进行排查。",
             parse_mode='Markdown'
         )
