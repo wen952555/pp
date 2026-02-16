@@ -167,13 +167,10 @@ async def start_playlist_stream(update, context):
     await stop_stream(update, context, silent=True)
 
     # 6. Build FFmpeg Command
-    # Added reconnect options to handle network instability
+    # Removed -reconnect options to fix 'Option not found' crash. 
+    # The proxy environment variables are still injected below to help with speed.
     cmd = [
         "ffmpeg",
-        "-reconnect", "1",
-        "-reconnect_at_eof", "1", 
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "20",
         "-re", 
         "-f", "concat",
         "-safe", "0",
